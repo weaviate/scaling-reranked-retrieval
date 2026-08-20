@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mixture-of-rerankers"
+version = "0.1.0"
+description = "Mixture-of-rerankers experiment: fusing heterogeneous hosted rerankers (Cohere / Voyage / Zerank) over Weaviate hybrid retrieval"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # retrieval adapters (Weaviate + reranker provider SDKs)
+    "weaviate-client[agents]>=4.16.4",
+    "cohere>=5.16.1",
+    "voyageai>=0.3.4",
+    "zeroentropy>=0.1.0a11",
+    "pydantic>=2.0",
+    # experiment harness + analysis
+    "query-agent-benchmarking>=0.7",
+    # transitive pin: qab 0.7 imports engram.RetrievalConfig, removed in weaviate-engram 1.0
+    "weaviate-engram==0.6.0",
+    "packaging>=23.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "matplotlib>=3.10.5",
+    # listwise LLM reranking (scripts/listwise_rerank.py) only
+    "openai>=1.60",
+    "tiktoken>=0.7.0",
+]
+
+[tool.setuptools]
+packages = [
+    "src",
+    "src.domain",
+    "src.ports",
+    "src.adapters",
+    "src.adapters.retrieval",
+    "src.application",
+    "src.application.experiments",
+    "src.application.analysis",
+]
