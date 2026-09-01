@@ -2,7 +2,7 @@
 """Noise-null robustness check for the routing claim (winner's-curse null).
 
 Run script — a thin wrapper; all logic lives in
-src.application.analysis.noise_null.
+scaling_reranked_retrieval.application.analysis.noise_null.
 Usage: uv run python scripts/noise_null.py [args]  (-h for options)
 
 The full (fusion) sweep is only bit-reproducible under a fixed string hash
@@ -21,7 +21,7 @@ if (
     os.environ["PYTHONHASHSEED"] = "0"
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
-from src.application.analysis.noise_null import main  # noqa: E402
+from scaling_reranked_retrieval.application.analysis.noise_null import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.config import DATASETS, RESULTS_DIR
+from scaling_reranked_retrieval.config import DATASETS, RESULTS_DIR
 
 SWEEP_KS = (100, 200, 500, 1000, 2000)
 

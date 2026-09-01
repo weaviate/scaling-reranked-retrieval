@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mixture-of-rerankers"
+name = "scaling-reranked-retrieval"
 version = "0.1.0"
-description = "Mixture-of-rerankers experiment: fusing heterogeneous hosted rerankers (Cohere / Voyage / Zerank) over Weaviate hybrid retrieval"
+description = "Companion code for Scaling Reranked Retrieval: depth, stages, and width in staged retrieval pipelines (Weaviate hybrid retrieval + cross-encoder and listwise reranking)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -30,14 +30,16 @@ dependencies = [
     "tiktoken>=0.7.0",
 ]
 
-[tool.setuptools]
-packages = [
-    "src",
-    "src.domain",
-    "src.ports",
-    "src.adapters",
-    "src.adapters.retrieval",
-    "src.application",
-    "src.application.experiments",
-    "src.application.analysis",
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: makes live provider API calls; requires the API keys in env (skips per-provider when a key is absent)",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
