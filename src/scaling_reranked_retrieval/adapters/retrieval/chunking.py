@@ -1,19 +1,7 @@
-"""Provider-agnostic chunked-rerank machinery.
-
-Hosted rerank APIs cap each request by document count (all three providers:
-1000 docs/call) and sometimes by payload size (Voyage: 600K tokens/batch,
-ZeroEntropy: 5MB UTF-8 bytes/request). Because cross-encoder rerankers score
-each (query, doc) pair independently of batch composition, splitting a batch
-across calls and merging by score is exact (not an approximation).
-
-This module holds the generic machinery only — no provider names, models, or
-error-message knowledge (those live in retrieval.providers):
-
-  - count-based chunking:      chunked_rerank / async_chunked_rerank
-  - byte-budget chunking:      byte_budget_chunks + byte_budget_chunked_rerank
-                               / async_byte_budget_chunked_rerank
-  - reactive halving retry:    make_halving_call / make_async_halving_call
-                               (parameterized by an is-overflow predicate)
+"""Provider-agnostic chunked-rerank machinery (count + byte-budget chunking,
+reactive halving retry). Splitting a batch and merging by score is exact:
+cross-encoders score each (query, doc) pair independently. Provider limits
+and error knowledge live in retrieval.providers.
 """
 from __future__ import annotations
 
@@ -22,9 +10,7 @@ from typing import Any, Callable, List
 
 from scaling_reranked_retrieval.adapters.retrieval.models import RerankItem
 
-# Per-provider hard limit on documents per rerank request. When we send more
-# than this in a single call, the make_*_reranker wrappers transparently split
-# the documents into chunks, rerank each chunk, and merge by score.
+# Per-provider hard API limit on documents per rerank request.
 MAX_DOCS_PER_CALL: dict[str, int] = {
     "cohere": 1000,
     "voyage": 1000,
@@ -63,10 +49,9 @@ def count_chunks(documents: List[str], max_per_call: int) -> List[tuple[int, Lis
 def byte_budget_chunks(
     documents: List[str], max_per_call: int, byte_budget: int
 ) -> List[tuple[int, List[str]]]:
-    """Greedily pack documents into (start_index, chunk) pairs bounded by both a
-    max doc count and a cumulative UTF-8 byte budget. A document larger than the
-    whole budget gets its own chunk (handled reactively / re-raised downstream).
-    Order is preserved, so start_index + local index recovers the original."""
+    """Greedily pack documents into (start_index, chunk) pairs bounded by max
+    doc count and cumulative UTF-8 bytes; an over-budget document gets its own
+    chunk (handled reactively downstream). Order is preserved."""
     chunks: List[tuple[int, List[str]]] = []
     cur: List[str] = []
     cur_bytes = 0
@@ -83,11 +68,6 @@ def byte_budget_chunks(
     if cur:
         chunks.append((cur_start, cur))
     return chunks
-
-
-# --------------------------------------------------------------------------- #
-# Count-based chunked rerank                                                   #
-# --------------------------------------------------------------------------- #
 
 
 def chunked_rerank(
@@ -126,11 +106,6 @@ async def async_chunked_rerank(
     return _merge_chunks(
         [(start, items) for (start, _), items in zip(chunks, chunk_items)], top_k
     )
-
-
-# --------------------------------------------------------------------------- #
-# Byte-budget chunked rerank (proactive splitting for payload-capped APIs)     #
-# --------------------------------------------------------------------------- #
 
 
 def byte_budget_chunked_rerank(
@@ -173,22 +148,12 @@ async def async_byte_budget_chunked_rerank(
     )
 
 
-# --------------------------------------------------------------------------- #
-# Reactive halving retry (for length-dependent limits the proactive split      #
-# can't fully predict: token counts, JSON-escaping inflation, …)               #
-# --------------------------------------------------------------------------- #
-
-
 def make_halving_call(
     call_chunk: Callable[[str, List[str], int], List[RerankItem]],
     is_overflow_error: Callable[[BaseException], bool],
 ) -> Callable[[str, List[str], int], List[RerankItem]]:
     """Wrap call_chunk so a payload-overflow error recursively halves the chunk
-    and retries each half. Returns all per-doc scores with indices in
-    [0, len(docs)); the outer chunked-rerank does the final sort + top_k cut.
-    Single-doc chunks that still overflow are re-raised so the failure surfaces
-    (a single (query, doc) pair exceeding the budget is not something splitting
-    can solve)."""
+    and retries; single-doc chunks that still overflow are re-raised."""
 
     def safe_call_chunk(query: str, docs: List[str], top_n: int) -> List[RerankItem]:
         try:
@@ -208,10 +173,7 @@ def make_async_halving_call(
     call_chunk: Callable[[str, List[str], int], Any],
     is_overflow_error: Callable[[BaseException], bool],
 ) -> Callable[[str, List[str], int], Any]:
-    """Async counterpart to make_halving_call. The two halves are awaited
-    concurrently — they're independent and the failed request that triggered
-    the split was a 400 (not rate-limited), so the concurrent burst doesn't
-    compound any rate pressure."""
+    """Async counterpart to make_halving_call; halves are awaited concurrently."""
 
     async def safe_call_chunk(query: str, docs: List[str], top_n: int) -> List[RerankItem]:
         try:

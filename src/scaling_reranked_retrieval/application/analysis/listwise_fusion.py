@@ -1,44 +1,8 @@
 """RRF fusion analysis over cached listwise-LLM rankings (zero LLM calls).
 
-The CE experiment's fusion question, ported to the listwise tier: do the
-listwise rerankers (gpt-5.4-mini, gpt-5.6-luna, gpt-5.6-terra — the
-effort-`none` trio) make sufficiently different errors — from each other and
-from the pool-source cross-encoder (Zerank-2) — that fusing their rankings
-beats the best single ranker on the head metrics?
-
-Method: RRF only (k=60). Listwise rerankers emit rankings, not scores, so
-rank-based fusion is the principled choice; a score-based RSF analog over
-rank-derived scores degenerates to weighted Borda and is deliberately not
-reported (see the design discussion in CLAUDE.md / ARCHITECTURE.md).
-
-Inputs (all on disk; no network):
-  - results/listwise/pools/<domain>__<pool-slug>__first<K>__top<P>.json
-      (fixed pool, its baseline order = the pool-source CE ranking, gold sets)
-  - results/listwise/cache/<domain>__<model>__<effort>__<pool-slug>__...jsonl
-      (per-(query, trial) listwise rankings, loaded via src.listwise)
-
-Rankers fused: the pool-source baseline (constant across trials) + one ranker
-per --models entry. Trials policy: TRIAL-ALIGNED — trial i of every stochastic
-model is fused with trial i of the others (zerank constant), giving one fused
-result per trial; report mean ± std across trials, matching the listwise
-experiment's own variance methodology.
-
-Menu (per available ranker set): singletons; every subset of size >= 2 at
-equal weight, member-named (with base + 3 models: 6 pairs, 4 triples, the
-4-way — equal-weight only — the experiment-wide menu policy,
-see src.conditions). Metrics: R@1, R@5,
-nDCG@10 (mean across queries per subset; median across subsets aggregate).
-R@POOL_K is the pool
-ceiling — invariant under reordering — and is reported once per subset.
-
-Outputs: results/listwise/fusion/<pool-slug>__first<K>__top<P>/
-    fusion.json     full per-subset × per-condition × per-trial results
-    FUSION.md       cross-subset report
-
-Usage:
-    uv run python scripts/listwise_fusion.py                       # both models
-    uv run python scripts/listwise_fusion.py --models gpt-5.4-mini # mini + zerank only
-    uv run python scripts/listwise_fusion.py --smoke               # biology only
+Trial-aligned fusion: trial i of every stochastic model is fused with trial i
+of the others (base constant); mean ± std across trials. RRF k=60 only —
+listwise rerankers emit rankings, not scores, so an RSF analog degenerates.
 """
 from __future__ import annotations
 
@@ -70,22 +34,8 @@ def base_label(pool_source: str) -> str:
     return pool_source.removesuffix("_only")
 
 
-# --------------------------------------------------------------------------- #
-# Condition menu                                                               #
-# --------------------------------------------------------------------------- #
-
-
 def build_menu(rankers: list[str]) -> list[dict]:
-    """Singletons + every subset of size >= 2, all at EQUAL WEIGHT, RRF only.
-
-    Equal-weight-only is the experiment-wide menu policy (see
-    src.conditions): the CE fixed-weight analysis found no tilt beats equal
-    beyond noise, so the tilted variants are not tested here either. Fusion
-    condition names are member-based (`rrf_<a>+<b>[+<c>...]_equal`) so the
-    menu scales past three rankers without ambiguity (the old fixed name
-    `rrf_3way_equal` is gone — with base + 3 listwise models the full set is
-    a 4-way).
-    """
+    """Singletons + every subset of size >= 2, all at equal weight, RRF only."""
     menu = [{"name": r, "rankers": (r,), "weights": {r: 1.0}} for r in rankers]
     for size in range(2, len(rankers) + 1):
         for combo in itertools.combinations(rankers, size):
@@ -97,21 +47,13 @@ def build_menu(rankers: list[str]) -> list[dict]:
     return menu
 
 
-# --------------------------------------------------------------------------- #
-# Per-subset evaluation                                                        #
-# --------------------------------------------------------------------------- #
-
-
 def evaluate_subset(
     base: str,
     model_sets: dict[str, ListwiseRankings],
     trials: int,
 ) -> dict:
-    """Evaluate the full menu on one subset.
-
-    Returns {condition: {metric: {trials: [...], mean, std}}} plus extras
-    (pool ceiling, agreement, oracle-selector, parse-failure counts).
-    """
+    """Evaluate the full menu on one subset; returns
+    {condition: {metric: {trials, mean, std}}} plus extras."""
     any_set = next(iter(model_sets.values()))
     qids = any_set.qids
     gold = any_set.gold
@@ -192,11 +134,6 @@ def evaluate_subset(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Cross-subset report                                                          #
-# --------------------------------------------------------------------------- #
-
-
 def _median_over(subset_payloads: dict[str, dict], cond: str, metric: str,
                  subsets: list[str]) -> float:
     return statistics.median(
@@ -234,7 +171,6 @@ def render_report(payload: dict) -> str:
             med_all = _median_over(payload["per_subset"], c, m, subsets)
             lines.append(f"| `{c}` | " + " | ".join(cells) +
                          f" | {med_all:.3f} |")
-        # Best-fusion-vs-best-singleton line.
         singles = [c for c in cond_names if not c.startswith("rrf_")]
         fusions = [c for c in cond_names if c.startswith("rrf_")]
         if fusions:
@@ -269,11 +205,6 @@ def render_report(payload: dict) -> str:
                  "this tier. `agree@1` = fraction of queries where two rankers "
                  "pick the same top-1 doc.")
     return "\n".join(lines) + "\n"
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

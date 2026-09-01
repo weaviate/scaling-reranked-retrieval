@@ -1,34 +1,7 @@
 #!/usr/bin/env python3
-"""Top-100 listwise reranking — Conditions A and B (GPT-5.6 Luna only).
-
-Spec: extend the listwise experiment from a 20-doc to a 100-doc window.
-  Condition A ("does the window scale?")   — Luna reranks the top-100 retained
-    by Zerank (cached zerank-2 scores over the k=2000 hybrid pool), descending
-    score order. Input recall ceiling: median 0.711.
-  Condition B ("can listwise replace the CE?") — Luna reranks the first 100
-    docs of the cached nested-prefix hybrid ordering (no cross-encoder).
-    Input recall ceiling: median 0.494.
-
-Identical model/prompt/effort to the existing top-20 runs (imported from
-retrieval/listwise_rerank.py — SYSTEM_PROMPT / USER_TEMPLATE / RESPONSE_FORMAT
-are shared objects, not copies); the only change is n=100 passages. 3 trials
-per query per condition. Zero cross-encoder / retrieval calls — inputs come
-from caches/k2000.json.
-
-ISOLATION: all artifacts land under results/raw/listwise_top100/ and the final
-report at results/listwise_top100_results.md. No existing results file is read
-for writing or modified.
-
-CLI (run in order):
-  uv run python scripts/listwise_top100.py --build-pools   # $0, one-time
-  uv run python scripts/listwise_top100.py --dry-run       # $0, token estimate
-  uv run python scripts/listwise_top100.py --pilot         # 10 q/condition, 1 trial
-  uv run python scripts/listwise_top100.py --run           # full 3-trial runs (gated on pilot)
-  uv run python scripts/listwise_top100.py --analyze       # $0, writes the report
-
-ENV: OPENAI_API_KEY (or a line `OPENAI_API_KEY=...` in the repo-root .env) for
---pilot / --run only.
-"""
+"""Top-100 listwise reranking — Conditions A (Zerank top-100) and B (hybrid
+top-100), GPT-5.6 Luna, 3 trials/query. Zero cross-encoder/retrieval calls;
+run --build-pools, --dry-run, --pilot, --run, --analyze in order."""
 from __future__ import annotations
 
 import argparse
@@ -57,8 +30,8 @@ from scaling_reranked_retrieval.config import (
 )
 from scaling_reranked_retrieval.domain.metrics import metric
 
-# The prompt/schema are IMPORTED from the existing harness so they cannot
-# drift from the top-20 runs (spec: identical prompt, only {n}=100 changes).
+# Prompt/schema are imported (shared objects) so they cannot drift from the
+# top-20 runs; only {n}=100 changes.
 from scaling_reranked_retrieval.application.experiments.listwise_rerank import (  # noqa: E402  (triggers qab.setup())
     MAX_COMPLETION_TOKENS,
     RESPONSE_FORMAT,
@@ -71,39 +44,27 @@ from scaling_reranked_retrieval.application.experiments.listwise_rerank import (
     load_corpus_text_map,
 )
 
-# --------------------------------------------------------------------------- #
-# Configuration (fixed by the spec)                                            #
-# --------------------------------------------------------------------------- #
-
 MODEL = "gpt-5.6-luna"
 EFFORT = "none"
 TRIALS = 3
 WINDOW = 100
 SEED = 42
 DEFAULT_CONCURRENCY = 8
-# Luna list price effective 2026-07-30 ($/1M input, output) — per the spec;
-# supersedes the older 1.00/6.00 entry in retrieval/listwise_rerank.MODEL_PRICES.
+# Luna list price; supersedes listwise_rerank.MODEL_PRICES.
 PRICE_IN, PRICE_OUT = 0.20, 1.20
 SPEC_INPUT_TOKENS_PER_CALL = 50_400  # original spec estimate (kept for reporting)
-PILOT_QUERIES_PER_SUBSET = 2         # 2 x 5 subsets = 10 queries per condition
-# Amendment 1 gates: token gate = expected MEAN band (actual BRIGHT docs are
-# ~110-180 tokens, not the d=500 modeling cap, so the original 50,400 estimate
-# was ~2x high — the -58% pilot deviation is explained, no re-run needed).
-# Malformed-rate gate SUSPENDED pending the severity analysis (--severity);
-# the decision rule there is head-intact@20 >= 90%.
+PILOT_QUERIES_PER_SUBSET = 2
+# Amendment-1 gates: token gate is a mean band; malformed-rate gate suspended
+# (report-only), go/no-go via --severity head-intact@20.
 PILOT_TOKEN_BAND = (15_000, 30_000)
 PILOT_MAX_MALFORMED_RATE = 0.20      # original spec value; report-only now
 PILOT_MAX_TOKEN_DEVIATION = 0.25     # original spec value; report-only now
-HEAD_INTACT_DECISION_RATE = 0.90     # amendment 1 decision rule (head-intact@20)
-# Amendment-1 resolution: if FULL-RUN head-intact@20 drops below this, note it
-# prominently at the top of the results file (do not stop the run).
+HEAD_INTACT_DECISION_RATE = 0.90     # amendment-1 decision rule
+# Below this, full-run head-intact@20 is flagged in the report (run not stopped).
 FULL_RUN_HEAD_INTACT_WARN = 0.95
-# Invariant: input-pool R@100 cross-subset medians pinned by the spec. analyze()
-# refuses to write results if the measured baseline medians do not match.
-# Re-pinned 2026-08-25 for the refreshed earth_science + robotics first-stage
-# pools (drift check + re-collection): A 0.711 -> 0.738 (earth_science's
-# refreshed zerank-top-100 ceiling moved the median); B unchanged at 0.494
-# (economics is still the median subset). Original June pins: A 0.711, B 0.494.
+# analyze() refuses to write results unless the measured input-pool R@100
+# cross-subset medians match these pins (re-pinned after the earth_science +
+# robotics first-stage refresh).
 PINNED_INPUT_R100 = {"A": 0.738, "B": 0.494}
 
 CONDITIONS = ("A", "B")
@@ -132,8 +93,7 @@ PROMPT_HASH = hashlib.sha256(
      + json.dumps(RESPONSE_FORMAT, sort_keys=True)).encode()
 ).hexdigest()
 
-# Reference rows for the report (values verified against the cached runs files
-# results/bright_*/runs_rk100/k2000_from_k2000.json — cross-subset medians).
+# Cross-subset medians verified against results/bright_*/runs_rk100/k2000_from_k2000.json.
 REFERENCE_ROWS = [
     ("Zerank top-20 input ordering (cached)", {"nDCG_at_10": 0.451,
                                                "recall_at_1": 0.376,
@@ -143,11 +103,6 @@ REFERENCE_ROWS = [
     ("Hybrid ordering, no rerank (cached)",   {"nDCG_at_10": 0.174,
                                                "recall_at_20": 0.256}),
 ]
-
-
-# --------------------------------------------------------------------------- #
-# Helpers                                                                      #
-# --------------------------------------------------------------------------- #
 
 
 def mean(xs):
@@ -175,17 +130,10 @@ def load_api_key() -> "str | None":
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Permutation classification + repair (spec Section "Permutation validation")         #
-# --------------------------------------------------------------------------- #
-
-
 def classify_and_repair(raw_ints: list[int], n: int) -> dict:
-    """Classify a returned ranking and mechanically repair it (spec policy):
-    1. keep the FIRST occurrence of each in-range ID (drop dups/out-of-range);
-    2. append all missing IDs at the end IN INPUT ORDER.
-    Failure flags (a response can carry several): duplicate, missing,
-    out_of_range, truncated, unparseable. valid = exact permutation of 1..n."""
+    """Repair policy: keep the FIRST occurrence of each in-range ID, then
+    append missing IDs at the end IN INPUT ORDER. valid = exact permutation
+    of 1..n; a response can carry several failure flags."""
     if not raw_ints:
         return {"repaired": list(range(1, n + 1)), "valid": False,
                 "flags": ["unparseable"], "n_appended": n,
@@ -212,14 +160,9 @@ def classify_and_repair(raw_ints: list[int], n: int) -> dict:
 
 
 def severity_of(raw_ints: list[int], n: int) -> dict:
-    """Amendment-1 severity metrics for one response (pre-repair):
-    - n_valid_unique: count of valid unique in-range IDs returned.
-    - head_intact_20 / head_intact_10: n_valid_unique >= 20 / >= 10.
-    - first_repair_rank: output position of the first repair-affected slot —
-      the slot where the first dropped duplicate/out-of-range element would
-      have gone (kept-so-far + 1), else the first appended slot
-      (n_valid_unique + 1); None for a valid permutation.
-    """
+    """Pre-repair severity metrics. first_repair_rank = output position of the
+    first repair-affected slot (first dropped element's would-be slot, else the
+    first appended slot); None for a valid permutation."""
     seen: set[int] = set()
     kept = 0
     first_affected = None
@@ -236,11 +179,6 @@ def severity_of(raw_ints: list[int], n: int) -> dict:
             "head_intact_10": kept >= 10,
             "first_repair_rank": first_affected,
             "raw_len": len(raw_ints)}
-
-
-# --------------------------------------------------------------------------- #
-# Pool construction (zero API calls)                                           #
-# --------------------------------------------------------------------------- #
 
 
 def load_cache(domain: str) -> ScoreCache:
@@ -335,9 +273,7 @@ def load_pool(domain: str, cond: str) -> dict:
         return json.load(f)
 
 
-# --------------------------------------------------------------------------- #
-# Response cache (append-only JSONL; resumable)                                #
-# --------------------------------------------------------------------------- #
+# Append-only JSONL response cache; resumable.
 
 
 def cache_file(domain: str, cond: str) -> Path:
@@ -368,11 +304,6 @@ def append_response_cache(domain: str, cond: str, entry: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
         f.write(json.dumps(entry) + "\n")
-
-
-# --------------------------------------------------------------------------- #
-# LLM call + concurrent fill                                                   #
-# --------------------------------------------------------------------------- #
 
 
 async def call_llm(client, user: str) -> dict:
@@ -480,11 +411,6 @@ async def fill(jobs: list[dict], concurrency: int, verbose: bool) -> list[dict]:
     return failures
 
 
-# --------------------------------------------------------------------------- #
-# Dry-run token estimate                                                       #
-# --------------------------------------------------------------------------- #
-
-
 def full_scope(conds=CONDITIONS) -> dict:
     return {(d, c): sorted(load_pool(d, c)["queries"].keys())
             for d in BRIGHT_SUBSETS for c in conds}
@@ -521,11 +447,6 @@ def dry_run() -> None:
           f"${PRICE_OUT:.2f} per 1M: ${usd:.2f}")
 
 
-# --------------------------------------------------------------------------- #
-# Pilot                                                                        #
-# --------------------------------------------------------------------------- #
-
-
 def pilot_scope() -> dict:
     scope = {}
     for domain in BRIGHT_SUBSETS:
@@ -548,7 +469,6 @@ def run_pilot(concurrency: int) -> None:
     failures = asyncio.run(fill(jobs, concurrency, verbose=True))
     wall = time.time() - t0
 
-    # Collect the pilot entries (trial 0 of the sampled queries).
     entries = []
     for (domain, cond), texts in scope.items():
         pool = load_pool(domain, cond)
@@ -565,9 +485,8 @@ def run_pilot(concurrency: int) -> None:
     dev = ((mean_in - SPEC_INPUT_TOKENS_PER_CALL) / SPEC_INPUT_TOKENS_PER_CALL
            if in_toks else 0.0)
     mal_rate = len(malformed) / n_ok if n_ok else 1.0
-    # Amendment-1 gates: token MEAN band + no API errors. Malformed rate is
-    # report-only (suspended); the go/no-go on it is --severity's
-    # head-intact@20 >= 90% decision rule.
+    # Gate = token mean band + no API errors; malformed rate is report-only
+    # (go/no-go on it is --severity's head-intact@20 rule).
     gate_ok = (not failures
                and PILOT_TOKEN_BAND[0] <= mean_in <= PILOT_TOKEN_BAND[1])
     report = {
@@ -615,17 +534,9 @@ def run_pilot(concurrency: int) -> None:
     print(f"  GATE: {'PASSED — proceed with --run' if gate_ok else 'FAILED — STOP AND REPORT (spec)'}")
 
 
-# --------------------------------------------------------------------------- #
-# Severity analysis (amendment 1; zero API calls)                              #
-# --------------------------------------------------------------------------- #
-
-
 def run_severity() -> None:
-    """Pilot severity analysis over the 20 cached pilot responses (no new API
-    calls). Reports pre-repair validity counts, head-intact@20/@10, the first
-    repair-affected rank per malformed response, and truncation lengths; then
-    applies the amendment-1 decision rule (head-intact@20 >= 90% -> full run
-    proceeds unchanged). Report-only: no design change is made here."""
+    """Pilot severity analysis over the cached pilot responses (zero API
+    calls); applies the head-intact@20 decision rule. Report-only."""
     scope = pilot_scope()
     rows: list[dict] = []
     for (domain, cond), texts in sorted(scope.items()):
@@ -678,8 +589,7 @@ def run_severity() -> None:
     }
     SEVERITY_REPORT.write_text(json.dumps(report, indent=2))
 
-    # Refresh the pilot report's gate to the amendment-1 rules so --run's
-    # gate check reflects the amended spec.
+    # Refresh the pilot gate so --run's check reflects the amended rules.
     if PILOT_REPORT.exists():
         rep = json.loads(PILOT_REPORT.read_text())
         mean_in = rep["input_tokens"]["mean"]
@@ -722,11 +632,6 @@ def run_severity() -> None:
              " — stop and report; design amendment is the author's call."))
 
 
-# --------------------------------------------------------------------------- #
-# Full run                                                                     #
-# --------------------------------------------------------------------------- #
-
-
 def run_full(concurrency: int, force: bool) -> None:
     if not load_api_key():
         raise SystemExit("OPENAI_API_KEY is not set (env or repo-root .env).")
@@ -762,16 +667,11 @@ def run_full(concurrency: int, force: bool) -> None:
     print("All calls cached. Next: uv run python scripts/listwise_top100.py --analyze")
 
 
-# --------------------------------------------------------------------------- #
-# Analysis + report                                                            #
-# --------------------------------------------------------------------------- #
-
-
 def analyze() -> None:
     conds: dict[str, dict] = {}
     all_snapshots: set[str] = set()
     ts_seen: list[str] = []
-    sev_rows: list[dict] = []  # per-response severity flags (full run)
+    sev_rows: list[dict] = []
     for cond in CONDITIONS:
         per_subset: dict[str, dict] = {}
         for domain in BRIGHT_SUBSETS:
@@ -843,7 +743,6 @@ def analyze() -> None:
                     gold = q["gold"]
                     for m in METRICS:
                         per_q[m].append(metric(m, gold, ranked))
-                    # Promotion decomposition (input rank vs output rank).
                     in_rank = {d: i for i, d in enumerate(q["doc_ids"], 1)}
                     out_rank = {d: i for i, d in enumerate(ranked, 1)}
                     p_q = sum(1 for d in gold if d in in_rank
@@ -908,15 +807,14 @@ def analyze() -> None:
     def med(cond, key, m):
         return statistics.median(conds[cond][d][key][m] for d in BRIGHT_SUBSETS)
 
-    # --- Invariant checks (must pass BEFORE any results are written) -------- #
-    # 1. R@100 == input pool recall exactly, per subset x trial x condition.
+    # Invariant: R@100 == input pool recall exactly, per subset x trial x condition.
     worst_r100 = max(conds[c][d]["r100_verification_max_abs_diff"]
                      for c in CONDITIONS for d in BRIGHT_SUBSETS)
     if worst_r100 > 1e-9:
         raise SystemExit(f"INVARIANT VIOLATED: Luna R@100 != input pool recall "
                          f"(max abs diff {worst_r100}) — something is broken; "
                          "stopping without writing results.")
-    # 2. Input-pool R@100 cross-subset medians match the spec's pinned values.
+    # Invariant: input-pool R@100 cross-subset medians match the pinned values.
     for cond, pin in PINNED_INPUT_R100.items():
         got = round(med(cond, "baseline", "recall_at_100"), 3)
         if got != pin:
@@ -924,7 +822,6 @@ def analyze() -> None:
                              f"R@100 median {got} != pinned {pin}; stopping "
                              "without writing results.")
 
-    # --- Full-run severity rollups (amendment-1 resolution) ---------------- #
     def _bucket(fr: int) -> str:
         if fr <= 20:
             return "le20"
@@ -1264,11 +1161,6 @@ def render_report(a: dict) -> str:
       "`results/raw/listwise_top100/severity_report.json`.")
     A("")
     return "\n".join(L)
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                         #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

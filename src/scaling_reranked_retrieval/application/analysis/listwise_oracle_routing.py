@@ -1,55 +1,8 @@
 """Oracle routing (binary selection) among the listwise models — S@1 only.
 
-The CE-tier routing analysis (analysis/oracle_config.py), ported to the
-listwise tier over an arbitrary model set (default: the effort-`none` trio
-gpt-5.4-mini, gpt-5.6-luna, gpt-5.6-terra; the pool-source CE baseline is
-NOT a menu member). Metric is Success@1 ONLY — qab's `recall_at_1` is a
-hit-rate (a gold doc at rank 1), i.e. Success@1; this analysis uses the
-honest name.
-
-SELECTION-ONLY BY DESIGN: the object of interest is the per-query BINARY
-router (pick one model per query), so the oracle here is `oracle_selector`
-= per-query best of the model singletons. The weighted-oracle quantities of
-the CE decomposition (`oracle_config`, `blending value` — per-query best
-over singletons + blends) are deliberately NOT computed: per-query weighted
-fusion is a different object with a worse winner's-curse exposure (the CE
-paper's "object 3", left as a direction there too).
-
-Per trial (trial-aligned, matching analysis/listwise_fusion.py), per query:
-  - S@1 of each singleton
-  - `best_static_fusion` — ONE fixed equal-weight RRF blend applied to every
-    query: the argmax over all equal-weight blends of the models (every
-    subset of size >= 2, RRF k=60) by pooled-mean S@1 across all subsets ×
-    queries × trials (the listwise analog of the CE decomposition's
-    "one fixed blend, re-selected by pooled-mean"). The chosen blend is
-    named in the output.
-  - `oracle_selector` = per-query best of the model singletons
-Derived, the paper Section 5.1 vocabulary:
-  - routing value       = oracle_selector − best_static_fusion
-  - selection headroom  = oracle_selector − best singleton (winner's-curse-
-    exposed; >= 0 by construction)
-
-Aggregation: mean across queries per (subset, trial) → mean ± std across
-trials per subset → median across subsets.
-
-Winner's-curse caveat (reported inline, not buried): the per-query max over
-N stochastic rankers is upward-biased under noise — the exposure the CE
-tier's noise-null (Section 5.1) quantifies, and it grows with N. Oracle lines are
-ceilings for a learned router, not achieved results; no listwise noise-null
-has been run.
-
-Inputs: the same validated ranking caches as the fusion analysis
-(src.listwise.load_listwise_rankings). Zero LLM calls / zero network.
-
-Outputs: results/listwise/oracle_routing/<pool-slug>__first<K>__top<P>/
-    <labels joined by __>__<effort>.json           full per-subset results
-    <labels joined by __>__<effort>__ROUTING.md    cross-subset report
-
-Usage:
-    uv run python scripts/listwise_oracle_routing.py            # the trio
-    uv run python scripts/listwise_oracle_routing.py \
-        --models gpt-5.6-luna gpt-5.6-terra                      # any subset
-    uv run python scripts/listwise_oracle_routing.py --smoke    # biology only
+Selection-only by design: the oracle is the per-query best singleton; per-query
+weighted fusion (oracle_config / blending value) is deliberately not computed.
+Oracle lines are winner's-curse-exposed ceilings, not achieved results.
 """
 from __future__ import annotations
 
@@ -77,11 +30,6 @@ METRIC = "recall_at_1"  # qab's name for the S@1 hit-rate; reported as S@1.
 DEFAULT_MODELS = ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-terra"]
 
 
-# --------------------------------------------------------------------------- #
-# Core                                                                         #
-# --------------------------------------------------------------------------- #
-
-
 def blend_menu(labels: list[str]) -> list[tuple[str, tuple[str, ...]]]:
     """Every equal-weight RRF blend of the models: (name, members), size >= 2."""
     out = []
@@ -92,9 +40,8 @@ def blend_menu(labels: list[str]) -> list[tuple[str, tuple[str, ...]]]:
 
 
 def analyze_subset(model_sets: dict[str, ListwiseRankings], trials: int) -> dict:
-    """Per-trial S@1 means for every singleton, every blend, and the
-    per-query selector (max over singletons). Blend selection happens later,
-    globally, from the pooled means."""
+    """Per-trial S@1 means for singletons, blends, and the per-query selector.
+    Blend selection happens later, globally, from the pooled means."""
     labels = list(model_sets)
     sets_ = list(model_sets.values())
     if any(ms.qids != sets_[0].qids for ms in sets_[1:]):
@@ -135,9 +82,8 @@ def analyze_subset(model_sets: dict[str, ListwiseRankings], trials: int) -> dict
 
 
 def summarize(payload: dict) -> None:
-    """Pick the global best static blend (pooled-mean S@1 across all subsets ×
-    queries × trials), then attach the derived per-subset lines:
-    best_static_fusion, routing_value, selection_headroom, best_singleton."""
+    """Pick the global best static blend by pooled-mean S@1, then attach the
+    derived per-subset lines."""
     per_subset = payload["per_subset"]
     any_sub = next(iter(per_subset.values()))
     labels = any_sub["labels"]
@@ -171,11 +117,6 @@ def summarize(payload: dict) -> None:
                       "std": statistics.pstdev(ts) if len(ts) > 1 else 0.0}
         p["best_singleton"] = {"which": best_singleton,
                                "mean": v[best_singleton]["mean"]}
-
-
-# --------------------------------------------------------------------------- #
-# Report                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def _median(per_subset: dict, key: str, subsets: list[str]) -> float:
@@ -242,11 +183,6 @@ def render_report(payload: dict) -> str:
         "been run.",
     ]
     return "\n".join(lines) + "\n"
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

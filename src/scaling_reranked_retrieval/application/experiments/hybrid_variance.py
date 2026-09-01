@@ -1,63 +1,8 @@
 """Measure across-trial variance of first-stage hybrid retrieval recall.
 
-Why: the MoCE evaluation runs each condition once (num_trials=1). The rerankers
-are justified single-trial (Voyage/Zerank bit-identical, Cohere negligible float
-noise — see score_variance.py). This closes the remaining gap: is the *retrieval*
-itself stable enough across runs that a single hybrid pass is honest?
-
-We answer it by re-running the exact `hybrid_only` condition (Weaviate hybrid,
-BM25 + Arctic 2.0, relative-score fusion — the same BaseRetriever the main
-experiment uses) `n_trials` times per subset at retrieved_k=2000, and looking at
-the spread of mean recall@k across trials. Because qab's orchestrator re-invokes
-the agent on every trial, each trial is a genuinely fresh query-time retrieval —
-exactly the variation a deployed system sees. The index is held fixed (no
-re-ingest), so the only varying input is the query.
-
-This reuses the *same* code path as the paper (run_search_eval + the hybrid_only
-BaseRetriever + the same recall cutoffs), so the means it reports are the very
-numbers Section 4.1 plots — not a re-implementation. qab already does the
-per-trial retrieval, the per-query mean, and across-trial mean/std/min/max
-(analysis.aggregate_metrics); this script only reshapes that into a methodology
-table, a machine-readable summary, and optional error-bar inputs.
-
-Two metric families are reported:
-    pool_recall : mean recall@k for k in {100,200,500,1000,2000} — presence in
-                  the top-k candidate pool. This is the ceiling the rerankers
-                  inherit (what 4.1 plots). Near-saturated, so low variance by
-                  construction.
-    ranked      : mean recall@1 and nDCG@10 on the hybrid ranking itself, before
-                  any rerank. Rank-1 identity is far more sensitive to fusion
-                  tie-flips than pool membership (score_variance.py has already
-                  observed a fresh hybrid top-1 differ from a cached one), so
-                  this is the stricter test — the one a reviewer attacks.
-
-Does NOT touch the downstream rerank score caches (results/.../caches/): it only
-reads gold sets via run_search_eval and writes to results/.../extras/ +
-results/hybrid_bounds_*.
-
-Two views:
-    single-k (default) : retrieve once at retrieved_k=2000 and read variance at
-                  every cutoff. This is the right denominator for the MAIN
-                  experiment's reported numbers, which all derive from one k=2000
-                  cache. Writes results/hybrid_bounds_{summary.json,table.md,
-                  errorbars.json}; --rebuild re-renders the table offline.
-    --k-sweep   : fresh-retrieve at EACH retrieved_k in {100,200,500,1000,2000}
-                  (independent retrievals, not one pool truncated) and report
-                  R@1/R@20 across-trial variance vs retrieved_k. A `limit=k`
-                  hybrid call sets HNSW's dynamic ef AND the relativeScoreFusion
-                  normalization pool, so smaller k is a different (and possibly
-                  noisier) operation — this view bounds the k=100 operating point
-                  and exposes the direct-vs-derived gap the cache shortcut hides.
-                  Writes results/hybrid_bounds_vs_k.{json,md}.
-
-Usage:
-    export WEAVIATE_URL=... WEAVIATE_API_KEY=...
-
-    uv run python scripts/hybrid_variance.py
-    uv run python scripts/hybrid_variance.py --k-sweep
-    uv run python scripts/hybrid_variance.py --k-sweep --datasets biology --num-samples 10
-    uv run python scripts/hybrid_variance.py --rebuild   # offline re-render
-"""
+Re-runs the hybrid_only condition n_trials times per subset (default: one
+retrieval at retrieved_k=2000; --k-sweep fresh-retrieves at each k). Never
+touches the rerank score caches. Requires WEAVIATE_URL / WEAVIATE_API_KEY."""
 from __future__ import annotations
 
 import argparse
@@ -80,26 +25,15 @@ from scaling_reranked_retrieval.domain.metrics import build_extra_metrics
 
 from scaling_reranked_retrieval.adapters import qab
 
-# qab>=0.7 guard + load_search_dataset memoization (keeps this in lockstep
-# with the main experiment).
+# qab>=0.7 guard + load_search_dataset memoization.
 qab.setup()
 
-# BRIGHT subsets, in the paper's order. IRPAPERS is excluded — it isn't part of
-# the Section 4.1 hybrid scaling chart.
+# IRPAPERS is excluded.
 DEFAULT_SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
 
-# Candidate-pool recall cutoffs (the Section 4.1 scaling-chart x-axis). Reported
-# as a secondary family — these are the ceiling the rerankers inherit, but they
-# are near-saturated and multi-gold, so a recall delta there isn't one query.
 POOL_RECALL_KS = [100, 200, 500, 1000, 2000]
 
-# HEADLINE ranked metrics, in the experiment's stated priority order (CLAUDE.md
-# "Metric priorities"): R@1 ("give me the answer") and R@20 ("give me a candidate
-# list") are primary; R@5 is the mid-range sidekick; nDCG@10 the ordering one.
-# All four are computed on the hybrid order itself, before any rerank, and are
-# already in qab's BRIGHT default metric profile (recall@1/5/20 + nDCG@10), so
-# surfacing R@5/R@20 here costs no extra retrieval — only a re-run to repopulate.
-# Maps a display name -> the qab metric key found in each per-trial dict.
+# Display name -> the qab metric key found in each per-trial dict.
 RANKED_METRICS = {
     "recall@1": "avg_recall_at_1",
     "recall@5": "avg_recall_at_5",
@@ -107,16 +41,10 @@ RANKED_METRICS = {
     "nDCG@10": "avg_nDCG_at_10",
 }
 
-# Which ranked metrics are the experiment's primary headlines (drive the verdict
-# and the movers callout); the rest are sidekicks shown for completeness.
 HEADLINE_RANKED = ("recall@1", "recall@20")
 
-# Smallest lift the paper treats as real, PER METRIC, so the variance verdict
-# divides each metric's own across-trial std by an effect measured in the SAME
-# units (the old table wrongly divided the R@1 effect by the pool-recall std and
-# printed a meaningless "1×"). R@1/R@5 single-query ≈ 0.010; smallest reported
-# R@1 fusion lift is +0.010, R@20 noise floor is ~0.010 (see CLAUDE.md Caveats),
-# nDCG@10's flat fusion lift is ~+0.012.
+# Smallest lift the paper treats as real, PER METRIC, so each metric's
+# across-trial std is judged against an effect in the SAME units.
 SMALLEST_EFFECT_BY_METRIC = {
     "recall@1": 0.010,
     "recall@5": 0.010,
@@ -126,12 +54,8 @@ SMALLEST_EFFECT_BY_METRIC = {
 # Back-compat alias (R@1 effect) for any external reader of the summary JSON.
 SMALLEST_REPORTED_EFFECT = SMALLEST_EFFECT_BY_METRIC["recall@1"]
 
-# Full-query-set sizes per BRIGHT subset (num_samples=None runs the whole set).
-# These convert an across-trial recall *range* into "gold-doc boundary crossings"
-# = range x Q: mean recall@k only moves when a gold doc crosses the rank-k line,
-# so range x Q is the integer number of single-gold-query-equivalents that
-# flipped between trials — the unit a reviewer can actually reason about.
-# Verified exact against the data: earth_science R@1 range 0.008621 == 1/116.
+# Full-query-set sizes per subset; range x Q = the integer number of
+# single-gold-query boundary crossings ("flips") between trials.
 SUBSET_QUERY_COUNTS = {
     "biology": 103,
     "earth_science": 116,
@@ -142,21 +66,12 @@ SUBSET_QUERY_COUNTS = {
 
 DEFAULT_RETRIEVED_K = 2000
 
-# --- retrieved_k sweep (the operating-point variance view) ---------------------
-# The main experiment derives every smaller-k result from one k=2000 collection,
-# so the k=2000 variance is the right denominator for THOSE numbers. But a real
-# `retrieved_k=k` retrieval is a *different operation*: the hybrid call issues
-# `collection.query.hybrid(limit=k)` with no ef/fusion overrides, so (a) HNSW's
-# dynamic ef scales with the limit (smaller k => narrower, more approximate
-# search) and (b) relativeScoreFusion min-max normalizes over the returned pool
-# of size k (so the fused HEAD order is pool-size sensitive). The sweep
-# fresh-retrieves at each k and measures across-trial variance per operating
-# point — leading with k=100 as the conservative bound — and exposes the
-# direct-vs-derived gap (mean at k vs mean at the largest k = the derived value).
+# --k-sweep: a limit=k hybrid call sets HNSW's dynamic ef AND the
+# relativeScoreFusion normalization pool, so each k is a different operation;
+# the sweep fresh-retrieves at each k (not one pool truncated).
 DEFAULT_SWEEP_KS = [100, 200, 500, 1000, 2000]
 
-# Headline cutoffs the sweep matrix tracks (both <= every swept k, so always
-# measurable). These are the two metrics the experiment centers on.
+# Both <= every swept k, so always measurable.
 SWEEP_METRICS = {
     "recall@1": "avg_recall_at_1",
     "recall@20": "avg_recall_at_20",
@@ -170,16 +85,9 @@ def _key_for_k(k: int) -> str:
 def _stats(values: list[float], q: int | None = None) -> dict:
     """Across-trial summary for one (subset, metric) cell.
 
-    std is the *sample* std (ddof=1), matching the spec — qab's own aggregate
-    uses population std (ddof=0); we recompute from the raw per-trial values so
-    the convention is explicit. With <2 trials std/range collapse to 0.
-
-    If `q` (the subset's query count) is given, also report `gold_flips` =
-    range x q — the integer-valued number of single-gold-query boundary
-    crossings that the across-trial range represents (mean recall@k moves only
-    when a gold doc crosses the rank-k line). This is the interpretable unit:
-    "1.0 flips" == "one query changed its hit/miss between trials".
-    """
+    std is the sample std (ddof=1), recomputed from raw per-trial values
+    (qab's own aggregate uses ddof=0). With `q` given, gold_flips = range x q
+    = single-gold-query boundary crossings."""
     n = len(values)
     mean = statistics.fmean(values) if values else 0.0
     std = statistics.stdev(values) if n > 1 else 0.0
@@ -200,10 +108,7 @@ def _stats(values: list[float], q: int | None = None) -> dict:
 
 
 def collect_per_trial(agg: dict) -> dict[str, list[float]]:
-    """Pull raw per-trial values for every metric out of qab's aggregate.
-
-    Returns {metric_key: [v_trial0, v_trial1, ...]} preserving trial order.
-    """
+    """{metric_key: [per-trial values]} from qab's aggregate, trial order preserved."""
     trials = agg.get("trials", [])
     if not trials:
         return {}
@@ -258,12 +163,8 @@ def median_across_subsets(
     per_subset_trials: dict[str, dict[str, list[float]]],
     metric_key: str,
 ) -> dict:
-    """Across-trial stats of the median-over-subsets line for one metric.
-
-    For each trial t, take the median over subsets of that subset's value at
-    trial t (the paper's "Median" series is a median across the five subsets),
-    then summarize that per-trial median series across trials.
-    """
+    """Per trial, take the median over subsets; then summarize that per-trial
+    median series across trials."""
     series = [v for v in per_subset_trials.values() if metric_key in v]
     if not series:
         return _stats([])
@@ -289,12 +190,8 @@ def _q_for(subset: str) -> int | None:
 
 
 def _per_metric_verdict(ranked_per_subset: dict) -> dict:
-    """For each ranked metric, the worst across-trial std/range over subsets and
-    the margin against THAT metric's own smallest reported effect.
-
-    Fixes the old single-denominator bug: R@1 noise is judged against the R@1
-    effect, R@20 noise against the R@20 effect, etc. — never against pool recall.
-    """
+    """Worst across-trial std/range per metric, judged against that metric's
+    own smallest reported effect (same units — never against pool recall)."""
     out: dict[str, dict] = {}
     for name in RANKED_METRICS:
         worst_std = {"value": 0.0, "subset": None}
@@ -324,7 +221,6 @@ def build_summary(
     per_subset_trials: dict[str, dict[str, list[float]]],
     config: dict,
 ) -> dict:
-    # --- pool recall family ---
     pool_per_subset: dict[str, dict[str, dict]] = {}
     for subset, trials in per_subset_trials.items():
         q = _q_for(subset)
@@ -338,7 +234,6 @@ def build_summary(
         for k in POOL_RECALL_KS
     }
 
-    # --- ranked family ---
     ranked_per_subset: dict[str, dict[str, dict]] = {}
     for subset, trials in per_subset_trials.items():
         q = _q_for(subset)
@@ -380,11 +275,7 @@ def build_summary(
 
 
 def _spread_cell(c: dict | None) -> str:
-    """One ranked cell as `mean` plus its across-trial spread in QUERY units.
-
-    Zero-variance cells (the common case) read `0.500  (0)` so the eye finds the
-    movers; movers read `0.209  (±.0039, 1.0q)`.
-    """
+    """One cell as `mean` plus its across-trial spread in query units."""
     if not c:
         return "n/a"
     if c["std"] == 0.0:
@@ -414,7 +305,6 @@ def build_table(summary: dict) -> str:
         "Cells are `mean  (±std, Nq)`.\n"
     )
 
-    # --- 1. The verdict, up top, per headline metric (R@1 / R@20) ---
     lines.append("## Verdict — do R@1 and R@20 move across trials?\n")
     verdict = summary["ranked"].get("per_metric_verdict", {})
     for name in RANKED_METRICS:
@@ -443,7 +333,6 @@ def build_table(summary: dict) -> str:
                 f"bit-identical. That std is {margin_txt}.\n"
             )
 
-    # --- 2. Headline ranked table (R@1 / R@5 / R@20 / nDCG@10) ---
     lines.append("## Headline cutoffs (hybrid order, pre-rerank)\n")
     names = list(RANKED_METRICS.keys())
     header = [n + (" ★" if n in HEADLINE_RANKED else "") for n in names]
@@ -461,7 +350,6 @@ def build_table(summary: dict) -> str:
     lines.append("\n★ = primary metric (CLAUDE.md priority). Median is across "
                  "subsets; its spread is omitted (Q differs by subset).\n")
 
-    # --- 3. Movers-only callout ---
     lines.append("## Movers only (every non-bit-identical cell)\n")
     movers: list[str] = []
     for family, block in (("R@k", summary["ranked"]), ("poolR@k", summary["pool_recall"])):
@@ -481,7 +369,6 @@ def build_table(summary: dict) -> str:
     else:
         lines.append("- (none — every cell bit-identical across all 5 trials)\n")
 
-    # --- 4. Pool recall family (the Section 4.1 ceiling), kept for completeness ---
     lines.append("## Pool recall@k (candidate-set ceiling — secondary)\n")
     lines.append(
         "Near-saturated and multi-gold, so a recall delta here is several "
@@ -503,12 +390,9 @@ def build_table(summary: dict) -> str:
 
 
 def build_errorbars(summary: dict) -> dict:
-    """Per-(subset, k) mean+std for the pool-recall family, shaped for plotting.
-
-    One series per subset plus a Median series, each a parallel {k, mean, std}.
-    NOTE: confirm this matches the Section 4.1 plotting code's expected shape;
-    if it consumes a different layout, reshape here rather than in the plotter.
-    """
+    """Per-(subset, k) mean+std for pool recall, one {k, mean, std} series per
+    subset plus a Median series. Reshape here (not in the plotter) if the
+    plotting code expects a different layout."""
     out: dict[str, dict] = {}
     ks = [str(k) for k in POOL_RECALL_KS]
     for subset, cells in summary["pool_recall"]["per_subset"].items():
@@ -536,13 +420,8 @@ def run_k_sweep(
     max_concurrent: int,
     use_async: bool,
 ) -> dict[str, dict[int, dict[str, list[float]]]]:
-    """Fresh-retrieve n_trials times at EACH retrieved_k, per subset.
-
-    Returns {subset: {k: {metric_key: [per-trial values]}}}. Each (subset, k) is
-    a genuinely separate hybrid retrieval at limit=k (not a truncation of a
-    larger pool), so its across-trial spread reflects that operating point's own
-    HNSW-ef + relativeScoreFusion-pool behavior.
-    """
+    """Fresh-retrieve n_trials times at EACH retrieved_k (a separate limit=k
+    retrieval, not a truncation). Returns {subset: {k: {metric_key: [values]}}}."""
     out: dict[str, dict[int, dict[str, list[float]]]] = {}
     for subset in subsets:
         out[subset] = {}
@@ -622,7 +501,6 @@ def build_sweep_table(summary: dict) -> str:
             row = [subset, str(q)] + [_spread_cell(cells.get(k)) for k in kcols]
             lines.append("| " + " | ".join(row) + " |")
 
-        # Footer 1 — does stability change with k? worst across-trial std per k.
         worst_std = []
         for k in kcols:
             stds = [cells[k]["std"] for cells in block.values() if k in cells]
@@ -632,7 +510,7 @@ def build_sweep_table(summary: dict) -> str:
             + " | ".join(f"{s:.4f}" for s in worst_std) + " |"
         )
 
-        # Footer 2 — direct-vs-derived: worst |mean(k) − mean(kmax)| across subsets.
+        # Direct-vs-derived: worst |mean(k) − mean(kmax)| across subsets.
         worst_drift = []
         for k in kcols:
             drifts = []
@@ -646,7 +524,6 @@ def build_sweep_table(summary: dict) -> str:
         )
         lines.append("")
 
-        # One-line verdict for this metric.
         trend = (
             "rises with k" if worst_std[-1] > worst_std[0] + 1e-9
             else "falls with k" if worst_std[-1] + 1e-9 < worst_std[0]
@@ -710,28 +587,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def rebuild_from_summary(output_dir: Path) -> None:
-    """Re-derive the new-format table from an on-disk summary.json (no network).
-
-    The persisted summary stores per-cell mean/min/max/range/std but not the
-    derived presentation fields (q, gold_flips, per_metric_verdict), and may
-    carry a stale alpha label — so we recompute those from the stored values and
-    rewrite table.md (and refresh summary.json in place). Ranked metrics absent
-    from the old summary (R@5/R@20) simply render as `n/a` — the honest signal
-    that a live re-run is still needed to fill them.
-    """
+    """Re-derive the table from an on-disk summary.json (no network),
+    recomputing derived presentation fields; metrics absent from the old
+    summary render as n/a until a live re-run fills them."""
     summary_path = output_dir / "hybrid_bounds_summary.json"
     if not summary_path.exists():
         raise SystemExit(f"--rebuild: no summary at {summary_path}; run a live pass first.")
     with open(summary_path) as f:
         summary = json.load(f)
 
-    # Correct the known-stale alpha label (was 0.5; actual unset Weaviate default).
+    # Correct the known-stale alpha label (actual = unset Weaviate default).
     cfg = summary.setdefault("config", {})
     cfg["alpha"] = 0.75
     cfg.setdefault("alpha_note",
                    "weaviate server default; not set client-side (hybrid_alpha=None)")
 
-    # Re-inject gold-flip units into every cell that has a known Q.
     for family in ("ranked", "pool_recall"):
         for subset, cells in summary.get(family, {}).get("per_subset", {}).items():
             q = SUBSET_QUERY_COUNTS.get(subset)
@@ -762,11 +632,8 @@ def main() -> None:
         rebuild_from_summary(args.output_dir)
         return
 
-    # Sanitize the Weaviate creds: a stray trailing newline (common from
-    # `export X=$(cat file)` or a copy-paste) lands inside the connection URL and
-    # raises `InvalidURL: ... '\n' at position 8`. qab + BaseRetriever read these
-    # straight from os.environ at connect time, so strip in-place so both see the
-    # cleaned value.
+    # A stray trailing newline in the Weaviate creds raises InvalidURL; qab +
+    # BaseRetriever read os.environ at connect time, so strip in-place.
     for var in ("WEAVIATE_URL", "WEAVIATE_API_KEY"):
         val = os.getenv(var)
         if not val:
@@ -832,9 +699,8 @@ def main() -> None:
     config = {
         "n_trials": args.n_trials,
         "retrieved_k": args.retrieved_k,
-        # alpha is NOT set client-side (BaseRetriever hybrid_alpha=None), so the
-        # Weaviate server default applies — 0.75, relativeScoreFusion. This is
-        # the same setting the paper's hybrid_only uses; report it, don't assert 0.5.
+        # alpha is not set client-side (hybrid_alpha=None); the Weaviate server
+        # default 0.75 applies.
         "alpha": 0.75,
         "alpha_note": "weaviate server default; not set client-side (hybrid_alpha=None)",
         "fusion": "relative_score",

@@ -1,19 +1,7 @@
-"""Persistent per-query rerank-score cache.
-
-The idea: run real Weaviate + Cohere + Voyage + Zerank-2 calls once at a large
-retrieved_k and cache every (query, doc_id) → (cohere_score, voyage_score,
-zerank_score). Then derive results for any smaller retrieved_k by filtering
-the cache to the top-N hybrid pool and recomputing rankings/normalizations
-locally — no API calls and no model inference.
-
-This is exact (not approximate) for all three rerankers because they are all
-cross-encoders that score each (query, doc) pair independently of batch
-composition.
-
-For RSF specifically: min-max normalization is pool-dependent, so it must be
-recomputed at derive time over the restricted pool — not reused from the
-collection-time normalization. The raw scores are pool-independent; the
-normalization is not.
+"""Persistent per-query rerank-score cache: collect once at large retrieved_k,
+derive any smaller k offline. Exact because all three rerankers score each
+(query, doc) pair independently; RSF min-max normalization is pool-dependent
+and must be recomputed at derive time.
 """
 from __future__ import annotations
 
@@ -24,15 +12,7 @@ from pathlib import Path
 
 @dataclass
 class ScoreCache:
-    """Persistent per-query cache of hybrid order + per-provider scores.
-
-    Layout:
-        metadata: dict      # dataset, collection, retrieved_k, model overrides
-        queries:  dict[str, {hybrid_order: [doc_id...],
-                             cohere_scores: {doc_id: float},
-                             voyage_scores: {doc_id: float},
-                             zerank_scores: {doc_id: float}}]
-    """
+    """Resumable per-query snapshot: metadata + queries[q] = {hybrid_order, {provider}_scores}."""
 
     metadata: dict = field(default_factory=dict)
     queries: dict[str, dict] = field(default_factory=dict)

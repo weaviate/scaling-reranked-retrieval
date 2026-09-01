@@ -1,24 +1,6 @@
-"""Mixture-of-rerankers experiment runner.
-
-Sweeps the condition menu (scaling_reranked_retrieval.domain.conditions.CONDITIONS — equal-weight
-fusion only: baselines + singletons + equal-weight pair/3-way RRF+RSF fusions
-across cohere/voyage/zerank; 12 conditions) against a configurable dataset
-(BRIGHT subsets + IRPAPERS text). Pipeline: Weaviate hybrid search (retrieved_k) -> rerank
-to reranked_k=20.
-
-Output layout under results/{results_subdir}/
-(results_subdir is per-dataset: e.g. bright_biology, irpapers_text):
-    caches/k{N}.json                       -- score cache from --collect-only
-    runs/k{N}_from_k{M}.json               -- derived eval at retrieved_k=N
-                                              from a cache collected at M
-    extras/collect_k{N}.json               -- side-effect metrics from collect
-    extras/...                             -- one-off artifacts
-
-Usage:
-    uv run python scripts/run_experiment.py --dataset biology
-    uv run python scripts/run_experiment.py --dataset earth_science --collect-only --retrieved-k 2000
-    uv run python scripts/run_experiment.py --dataset earth_science --from-cache .../caches/k2000.json --retrieved-k 500
-"""
+"""Mixture-of-rerankers experiment runner: sweeps CONDITIONS against a
+dataset. Modes: real-call, --collect-only (write the score cache), and
+--from-cache (derive results locally, zero API calls)."""
 from __future__ import annotations
 
 import argparse
@@ -31,8 +13,7 @@ from query_agent_benchmarking import run_search_eval
 
 from scaling_reranked_retrieval.adapters import qab
 
-# qab>=0.7 guard + per-dataset loader memoization (30 run_search_eval calls
-# per sweep would otherwise reload the corpus each time).
+# qab>=0.7 guard + loader memoization (avoids reloading the corpus per condition).
 qab.setup()
 
 from scaling_reranked_retrieval.adapters.retrieval.clients import (  # noqa: E402
@@ -74,13 +55,8 @@ def build_retriever(
     collection_name: str,
     target_property: str,
 ):
-    """Build the retriever for one condition.
-
-    Returns a plain BaseRetriever (hybrid search, no rerank) when
-    condition.provider is None, otherwise a CrossEncoderReranker.
-    hybrid_only's retrieved_k tracks the experiment's retrieved_k so that
-    Recall@{50,100,200,500} measure the actual first-stage ceiling.
-    """
+    """BaseRetriever (hybrid, no rerank) when condition.provider is None,
+    else a CrossEncoderReranker."""
     if condition.provider is None:
         return BaseRetriever(
             collection_name=collection_name,
@@ -90,7 +66,6 @@ def build_retriever(
             verbose=False,
         )
 
-    # Determine which rerankers this condition needs.
     if condition.provider == "hybrid":
         needed: tuple[str, ...] = condition.rerankers
     elif condition.provider in ("cohere", "voyage", "zerank"):
@@ -131,12 +106,8 @@ def run_condition(
     extra_metrics: list[dict],
     max_concurrent: int,
 ) -> dict:
-    """Run a single condition through query_agent_benchmarking.
-
-    Per-condition metrics are written by run_search_eval to scratch_path; the
-    aggregated summary is built by the caller via write_summary. scratch files
-    are kept for crash-recovery / spot-debugging but live under runs/.scratch/.
-    """
+    """Run one condition through query_agent_benchmarking; scratch files are
+    kept under runs/.scratch/ for crash recovery."""
     print(f"\n=== {condition.name} (retrieved_k={retrieved_k}) ===")
     if condition.provider is None:
         print("  provider=none (hybrid search, no rerank)")
@@ -175,11 +146,8 @@ def write_summary(
     summary_path: Path,
     cache_retrieved_k: Optional[int] = None,
 ) -> None:
-    """Write a single summary JSON containing all condition metrics.
-
-    cache_retrieved_k is recorded when this is a derived run (from --from-cache);
-    None for real-call or collect-only summaries.
-    """
+    """Write the all-conditions summary JSON; cache_retrieved_k is set only
+    for derived (--from-cache) runs."""
     payload = {
         "dataset": dataset_name,
         "collection": collection_name,
@@ -304,7 +272,7 @@ def main() -> None:
 
     required = ["WEAVIATE_URL", "WEAVIATE_API_KEY"]
     if not args.from_cache:
-        # Real or collect modes both need reranker keys
+        # Real and collect modes both need reranker keys.
         required += ["COHERE_API_KEY", "VOYAGE_API_KEY", "ZERANK_API_KEY"]
     missing = [v for v in required if not os.getenv(v)]
     if missing:
@@ -319,8 +287,7 @@ def main() -> None:
     results_dir = get_results_dir(dataset_slug)
     extra_metrics = build_extra_metrics(retrieved_k, cfg)
     configure_voyage_post_call_sleep(args.voyage_sleep_seconds)
-    # Default reranked_k=20 writes to runs/; any other value writes to a sibling
-    # runs_rk{N}/ so prior reranked_k=20 sweeps stay addressable.
+    # Non-default reranked_k writes to runs_rk{N}/ so prior rk20 sweeps stay addressable.
     runs_subdir = "runs" if reranked_k == DEFAULT_RERANKED_K else f"runs_rk{reranked_k}"
     print(
         f"dataset={dataset_slug} ({dataset_name})  collection={collection_name}"
@@ -335,7 +302,6 @@ def main() -> None:
         f"voyage_sleep={args.voyage_sleep_seconds}s"
     )
 
-    # ----------------- Collect-only mode ----------------- #
     if args.collect_only:
         if args.from_cache:
             raise SystemExit("--collect-only and --from-cache are mutually exclusive.")
@@ -388,7 +354,6 @@ def main() -> None:
         )
         return
 
-    # ----------------- From-cache (derived) mode ----------------- #
     cache: Optional[ScoreCache] = None
     cache_retrieved_k: Optional[int] = None
     if args.from_cache:
@@ -407,7 +372,6 @@ def main() -> None:
             f"retrieved_k={cache_retrieved_k}"
         )
 
-    # ----------------- Condition selection (shared) ----------------- #
     conditions = CONDITIONS
     if args.smoke:
         conditions = CONDITIONS[:1]
@@ -418,8 +382,7 @@ def main() -> None:
         if not conditions:
             raise SystemExit(f"No matching conditions in --only={args.only}")
 
-    # Naming for the summary file + per-condition scratch dir. Derived runs
-    # encode provenance ("from_k{M}"); real-call runs are tagged "_real".
+    # Derived runs encode provenance ("from_k{M}"); real-call runs are "_real".
     if args.from_cache:
         run_label = f"k{retrieved_k}_from_k{cache_retrieved_k}"
     else:

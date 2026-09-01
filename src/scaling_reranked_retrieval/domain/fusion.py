@@ -1,16 +1,10 @@
 """Pure ranking/fusion functions over cached reranker scores.
 
-This is the single implementation of the derive-time ranking semantics; the
-DerivedSearchAgent and every analysis share it.
-
-Behavior contract (do not "fix" without re-deriving every published number):
-  - rsf_fuse iterates set(pool) when building the fused dict, so exact
-    fused-score ties at the rank-K boundary break in string-hash order
-    (PYTHONHASHSEED-dependent, ~1 query of wobble).
-  - min_max is pool-dependent and must be recomputed on the restricted pool
-    at every derive — never reused from a larger-k normalization.
-  - All sorts are stable descending-by-score, so equal scores keep insertion
-    order (hybrid-pool order for singletons, accumulation order for fusion).
+Pinned behavior contract (published numbers depend on it):
+  - rsf_fuse iterates set(pool), so exact fused-score ties at the rank-K
+    boundary break in string-hash order (PYTHONHASHSEED-dependent).
+  - min_max is pool-dependent; recompute on the restricted pool at every derive.
+  - Sorts are stable descending-by-score, so equal scores keep insertion order.
 """
 from __future__ import annotations
 
@@ -40,7 +34,6 @@ def rsf_fuse(
     rerankers: tuple[str, ...],
 ) -> dict[str, float]:
     """Relative Score Fusion: min-max normalize per reranker, weighted sum."""
-    # Min-max normalize each reranker independently on the filtered pool.
     normed = {r: min_max(scores) for r, scores in per_reranker.items()}
     pool_set = set(pool)
     fused: dict[str, float] = {}
@@ -78,13 +71,10 @@ def rrf_fuse_rankings(
     weights: dict[str, float],
     rrf_k: int = RRF_K,
 ) -> list[str]:
-    """RRF directly over ordered doc-id lists (rank-only rerankers, e.g. the
-    listwise LLM rerankers, which emit rankings without scores).
+    """RRF directly over ordered doc-id lists (rank-only rerankers).
 
-    Same math as rrf_fuse (contribution w/(rrf_k + rank + 1)), but positions
-    come straight from list order instead of a score sort. Exact fused-score
-    ties (possible with symmetric weights) break deterministically by the
-    first ranker's list order (stable sort over insertion order).
+    Exact fused-score ties break deterministically by the first ranker's
+    list order (stable sort over insertion order).
     """
     fused: dict[str, float] = {}
     for r, ranked in rankings.items():

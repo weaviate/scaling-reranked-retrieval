@@ -1,51 +1,9 @@
 """Per-clone unique successes under the noise-null — the winner's-curse twin of
-`unique_successes_k200.py`.
+the real unique-successes table.
 
-WHAT THIS ANSWERS
------------------
-`unique_successes_k200.py` reports, per real reranker (Cohere / Voyage / Zerank),
-how many queries it ALONE rescues (gold in its top-K while both others miss) — the
-per-model heterogeneity that fusion / routing feeds on. A skeptic's objection:
-*any* three estimators — even three i.i.d. NOISY COPIES of a single model — each
-manufacture some "unique successes" purely by selection-on-noise (winner's curse).
-So how much of the real 11 / 19 / 21 (@1) is genuine model heterogeneity vs. a
-statistical artifact of taking a per-query best-of-three?
-
-This module answers that by running the EXACT unique-success counting logic from
-`unique_successes_k200.py` (`analyze_subset`) over the SAME noise clones the Section 5.1
-noise-null (`noise_null.py`) builds: clone ONE base model (Zerank, the strongest
-R@1 singleton) into three independent noisy copies `s_i = s + e_i`,
-`e_i ~ N(0, alpha*sigma_q)`, written into the cohere/voyage/zerank score slots,
-then count per-slot unique successes. Under ZERO true heterogeneity the three
-clones are i.i.d., so:
-  * their unique-success counts are EQUAL in expectation (a built-in symmetry
-    check — the real 11/19/21 asymmetry has no null analogue), and
-  * any non-zero "any-unique" count is winner's curse, rising with the noise
-    scale alpha and with pool depth k.
-
-The headline comparison is the **aggregate any-unique total** (queries rescued by
-exactly one of three): real = 51 @1 (Cohere 11 + Voyage 19 + Zerank 21) vs. the
-null's seed-averaged any-unique at a matched (alpha, k). Reported at the same
-operating point as the real table: retrieved_k=200, reranked_k=20.
-
-REUSE (no reimplementation)
----------------------------
-- `analyze_subset` / `PROVIDERS` / `SUCCESS_CUTOFFS` ... from unique_successes_k200
-  — the unique-success counter, applied unchanged to a clone cache (the three
-  singleton conditions read the cohere/voyage/zerank clone slots).
-- `build_clone_cache` / `install_no_network_guard` from noise_null — the SAME
-  noise model and the no-network guard.
-Tie-free (singletons only, no RSF/RRF fusion), so no PYTHONHASHSEED pin is needed
-(cf. noise_null's --singleton-only mode). Zero network; pure cache derivation.
-
-Outputs (under results/):
-  unique_successes_noise_null_k{K}.json       — real ref + per-(alpha) null counts
-  unique_successes_noise_null_k{K}_table.md   — the table, real vs null by alpha
-
-Usage:
-    uv run python scripts/unique_successes_noise_null.py --smoke
-    uv run python scripts/unique_successes_noise_null.py
-    uv run python scripts/unique_successes_noise_null.py --depths 200 2000
+Runs the unchanged analyze_subset counter over three i.i.d. noisy clones of one
+base model; any null any-unique count is selection-on-noise. Tie-free
+(singletons only, no fusion), so no PYTHONHASHSEED pin is needed. Zero network.
 """
 from __future__ import annotations
 
@@ -70,23 +28,12 @@ from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
-# --------------------------------------------------------------------------- #
-# Configuration (defaults; CLI-overridable)                                    #
-# --------------------------------------------------------------------------- #
-
 RETRIEVED_K = 200                                  # match the real table's operating point
-BASE = "zerank"                                    # strongest R@1 singleton (the conservative clone)
-ALPHAS = (0.05, 0.10, 0.25, 0.50, 1.00)            # noise scales (same sweep as noise_null)
+BASE = "zerank"                                    # strongest R@1 singleton
+ALPHAS = (0.05, 0.10, 0.25, 0.50, 1.00)            # same sweep as noise_null
 N_SEEDS = 20
-# Clone slots are i.i.d. noise of ONE base — they are NOT the real models, so we
-# relabel them A/B/C in the output to avoid implying model identity. The slot
-# order is PROVIDERS = (cohere, voyage, zerank); the mapping is cosmetic.
+# Clone slots are relabeled A/B/C in output — they are not the real models.
 CLONE_LABELS = {p: lab for p, lab in zip(PROVIDERS, ("A", "B", "C"))}
-
-
-# --------------------------------------------------------------------------- #
-# Aggregation helpers                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def _aggregate_over_subsets(per_subset: dict, present: list[str]) -> dict:
@@ -115,11 +62,6 @@ def _mean_std(xs: list[float]) -> tuple[float, float]:
     return m, s
 
 
-# --------------------------------------------------------------------------- #
-# Null sweep                                                                   #
-# --------------------------------------------------------------------------- #
-
-
 def run_null(
     real: dict[str, tuple],
     k: int,
@@ -128,27 +70,17 @@ def run_null(
     n_seeds: int,
     base: str,
 ) -> dict:
-    """Per-(alpha) seed-averaged unique-success counts over the noise clones.
-
-    For each (alpha, seed): build three i.i.d. noisy clones of `base`, count
-    unique successes per clone slot with the unchanged `analyze_subset`, sum
-    across subsets. Then average (mean + std) across seeds. Also tracks the
-    per-subset seed-mean of each slot's unique count for the per-subset table,
-    and the clone hit-rate@1 (mean over slots of success@1 / n) as a calibration
-    check against the real base singleton.
-    """
+    """Per-(alpha) seed-averaged unique-success counts over the noise clones."""
     present = list(real.keys())
     out: dict[float, dict] = {}
 
     for alpha in alphas:
-        # Per-seed aggregate any-unique + per-slot unique, plus per-subset/slot.
-        seed_agg = []                                  # list of _aggregate_over_subsets dicts
-        # per_subset_slot_unique[ds][K][p] -> list over seeds
+        seed_agg = []
         ps_unique = {
             d: {K: {p: [] for p in PROVIDERS} for K in SUCCESS_CUTOFFS}
             for d in present
         }
-        clone_r1_seeds = []                            # clone hit-rate@1 per seed
+        clone_r1_seeds = []
 
         for seed in range(n_seeds):
             per_subset = {}
@@ -171,7 +103,6 @@ def run_null(
                   f"any-unique @1={agg[1]['any_unique']} @20={agg[20]['any_unique']}",
                   flush=True)
 
-        # Reduce across seeds.
         agg_stats = {}
         for K in SUCCESS_CUTOFFS:
             per_slot = {}
@@ -208,16 +139,8 @@ def run_null(
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Real reference (same code path)                                              #
-# --------------------------------------------------------------------------- #
-
-
 def compute_real_reference(real: dict[str, tuple], k: int, reranked_k: int) -> dict:
-    """Real Cohere/Voyage/Zerank unique successes — same `analyze_subset` path.
-
-    Reproduces unique_successes_k{k}.json's aggregate so the null sits next to a
-    self-consistent real reference (not a value read off disk)."""
+    """Real unique successes via the same `analyze_subset` path (not read off disk)."""
     present = list(real.keys())
     per_subset = {}
     for ds in present:
@@ -225,11 +148,6 @@ def compute_real_reference(real: dict[str, tuple], k: int, reranked_k: int) -> d
         per_subset[ds] = analyze_subset(cache, qs, k, reranked_k)
     agg = _aggregate_over_subsets(per_subset, present)
     return {"per_subset": per_subset, "aggregate": agg}
-
-
-# --------------------------------------------------------------------------- #
-# Driver                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def run(k: int, reranked_k: int, alphas: tuple, n_seeds: int, base: str,
@@ -292,14 +210,9 @@ def run(k: int, reranked_k: int, alphas: tuple, n_seeds: int, base: str,
     return payload
 
 
-# --------------------------------------------------------------------------- #
-# Markdown                                                                     #
-# --------------------------------------------------------------------------- #
-
-
 def _valid_regime(payload: dict) -> list[float]:
-    """Alphas where the clones keep >=90% of their alpha->0 hit-rate@1 (calibrated
-    to the base singleton's quality, not degraded). Matches noise_null's regime."""
+    """Alphas where clones keep >=90% of their alpha->0 hit-rate@1 (matches
+    noise_null's regime)."""
     null = payload["null_by_alpha"]
     alphas = sorted(null.keys(), key=float)
     clean = null[alphas[0]]["clone_hit_rate_at_1"]
@@ -339,26 +252,23 @@ def render_table(payload: dict) -> str:
       + f"{real[1][base]['success'] / real['n']:.3f}).")
     A("")
 
-    # ---- Aggregate table per cutoff ----
     for K in SUCCESS_CUTOFFS:
         A(f"## Aggregate unique successes @{K} (n={real['n']})")
         A("")
         A("| Source | A | B | C | per-model mean | **any-unique** |")
         A("|---|---|---|---|---|---|")
-        # Real row (c/v/z shown under the A/B/C columns with labels).
         rc = [real[K][p]["unique"] for p in PROVIDERS]
         A(f"| **real** (C/V/Z) | {rc[0]} | {rc[1]} | {rc[2]} | "
           f"{sum(rc) / len(PROVIDERS):.1f} | **{real[K]['any_unique']}** |")
         for a in alphas:
             st = null[a]["aggregate"][K]
             cells = [f"{st['per_slot'][p]['unique_mean']:.1f}" for p in PROVIDERS]
-            tag = "" if a in valid else " ⟂"          # ⟂ = clones degraded (outside regime)
+            tag = "" if a in valid else " ⟂"          # ⟂ = outside regime
             A(f"| null α={a}{tag} | {cells[0]} | {cells[1]} | {cells[2]} | "
               f"{st['per_clone_mean']:.1f} | "
               f"{st['any_unique_mean']:.1f} ± {st['any_unique_std']:.1f} |")
         A("")
 
-    # ---- Real-vs-null headline ----
     A("## Real vs. null — any-unique (the heterogeneity that fusion feeds on)")
     A("")
     A("Conservative null = the largest **valid-regime** α (clones still ≈ base quality). "
@@ -376,7 +286,6 @@ def render_table(payload: dict) -> str:
         A(f"| @{K} | {rv} | {nv:.1f} | {rv - nv:+.1f} | {frac:.2f} |")
     A("")
 
-    # ---- Per-subset @1 / @20 at the conservative alpha ----
     for K in (1, 20):
         A(f"## Per-subset unique successes @{K} — real vs null (α={cons})")
         A("")
@@ -394,7 +303,6 @@ def render_table(payload: dict) -> str:
               f"{n_cells[0]:.1f}/{n_cells[1]:.1f}/{n_cells[2]:.1f} | {n_any:.1f} |")
         A("")
 
-    # Quantities the reading prose cites (kept in sync with the tables above).
     lo_a = alphas[0]
     f1_lo = null[lo_a]["aggregate"][1]["any_unique_mean"] / real[1]["any_unique"]
     f1_hi = null[cons]["aggregate"][1]["any_unique_mean"] / real[1]["any_unique"]
@@ -421,11 +329,6 @@ def render_table(payload: dict) -> str:
     return "\n".join(L)
 
 
-# --------------------------------------------------------------------------- #
-# Smoke + CLI                                                                  #
-# --------------------------------------------------------------------------- #
-
-
 def run_smoke() -> None:
     print("=== SMOKE: biology, 3 seeds, alpha {0.10, 0.50}, k=200 ===")
     install_no_network_guard()
@@ -434,17 +337,16 @@ def run_smoke() -> None:
         base=BASE, subsets=["biology"], write=False,
     )
     null = payload["null_by_alpha"]
-    # Symmetry: the three i.i.d. slots should carry ~equal unique counts.
+    # Symmetry: i.i.d. slots should carry ~equal unique counts.
     for a in (0.10, 0.50):
         slots = [null[a]["aggregate"][1]["per_slot"][p]["unique_mean"] for p in PROVIDERS]
         spread = max(slots) - min(slots)
         print(f"  alpha={a} @1 per-slot {[f'{s:.1f}' for s in slots]} spread={spread:.1f}")
-    # Monotone: more noise -> more manufactured unique successes (@1).
     lo = null[0.10]["aggregate"][1]["any_unique_mean"]
     hi = null[0.50]["aggregate"][1]["any_unique_mean"]
     print(f"  any-unique@1: alpha=0.10 {lo:.1f}  alpha=0.50 {hi:.1f}")
     assert hi >= lo - 1e-9, "any-unique did not grow with alpha"
-    # Real reference reproduces the published biology @1 c/v/z = 0/5/3.
+    # Regression: published biology @1 c/v/z = 0/5/3.
     rb = payload["real_reference"]["per_subset"]["biology"]["counts"][1]
     cvz = [rb[p]["unique"] for p in PROVIDERS]
     print(f"  real biology @1 c/v/z = {cvz} (expect [0, 5, 3])")

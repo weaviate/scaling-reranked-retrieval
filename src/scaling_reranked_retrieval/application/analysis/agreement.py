@@ -1,55 +1,7 @@
 """Reranker agreement, overlap, and oracle-ceiling analysis.
 
-Pure derivation over the existing k=2000 score caches — ZERO reranker API
-calls (this module never imports a provider client; see acceptance criterion 1
-in the spec). It measures the *mechanism* behind the mixture-of-rerankers
-fusion lift: how decorrelated Cohere `rerank-v4.0-pro`, Voyage `rerank-2.5`,
-and Zerank-2 actually are, how much headroom that decorrelation creates, and
-what perfect per-query selection over the deployed fusion menu could score.
-
-What it computes, per (dataset, retrieved_k):
-  - Rank-1 agreement (pairwise + three-way)                     (spec 4.1)
-  - Top-m Jaccard overlap, m in {5, 20, 100}                    (spec 4.2)
-  - Full-pool Kendall tau-b rank correlation                   (spec 4.3)
-  - R@1 correctness Venn decomposition (8 cells)               (spec 4.4)
-  - Conditional top-1 precision (agree vs disagree)            (spec 4.5)
-  - Oracle selector ceiling over {R@1,R@5,R@20,nDCG@10}        (spec 4.6)
-  - Oracle-config@K — per-query oracle over the 29-condition  (spec 4.7)
-    menu (3 singletons + 26 fusion blends), rank-respecting
-All of the above at every k in {100,200,500,1000,2000}        (spec 4.8)
-
-Why oracle-config and not oracle-merge: a set-union "oracle" credits a gold
-doc the moment it appears anywhere in the union of three top-K lists — that
-ignores rank order and overstates what any weighted fusion can realize (no
-weighted fusion can keep one reranker's gold doc without inheriting whatever
-that same weighting promotes above it). Oracle-config takes the per-query
-max over the menu of actual reranked rankings, so each pick is a real
-top-K block and respects rank order. It is the rank-respecting per-query
-oracle over a deployable configuration set.
-
-  oracle_config@K(q) = max over c in MENU of metric(top_K(ranking_c(q)))
-
-Optional second pass (--simplex-grid): for each query, grid-sweep weights on
-the 3-simplex (step 0.05 → 231 points), calling the retrieval-layer fuse_rsf and
-fuse_rrf so fusion semantics match the experiment exactly. Per-query max
-across the grid gives a LOWER bound on the continuous fusion-family
-optimum (recall@K is piecewise-constant in weights; finite grids miss thin
-optimal regions). Off by default — adds compute, still zero-API.
-
-Metric functions are imported from query_agent_benchmarking so they match
-run_search_eval exactly. Pool filtering + ranking reuse DerivedSearchAgent so
-they are byte-identical to the derive path (regression guard, spec 9.3).
-
-Outputs:
-  results/bright_<dataset>/extras/agreement_k{N}_from_k2000.json  (one per k)
-  results/AGREEMENT.md                                            (--all-datasets)
-
-Usage:
-    uv run python scripts/agreement.py --dataset biology
-    uv run python scripts/agreement.py --dataset biology --retrieved-k 500
-    uv run python scripts/agreement.py --all-datasets
-    uv run python scripts/agreement.py --all-datasets --simplex-grid
-    uv run python scripts/agreement.py --dataset biology --smoke
+Pure derivation over the k=2000 score caches — zero reranker API calls.
+Oracle-config is a rank-respecting per-query max over real menu rankings.
 """
 from __future__ import annotations
 
@@ -72,9 +24,6 @@ from scaling_reranked_retrieval.config import (
     RESULTS_DIR,
     get_results_dir,
 )
-# Read-only re-use of the same Condition specs run_search_eval consumes; this
-# guarantees oracle-config is consistent with runs/k{N}_from_k2000.json by
-# construction.
 from scaling_reranked_retrieval.domain.conditions import (
     CONDITIONS as _RE_CONDITIONS,
     SINGLETON_CONDITIONS,
@@ -83,9 +32,6 @@ from scaling_reranked_retrieval.domain.conditions import (
 from scaling_reranked_retrieval.domain.metrics import CAP20_METRICS, metric as _metric
 from scaling_reranked_retrieval.application.queryset import QuerySet, build_query_set, load_and_validate
 
-# Library fusion functions used only by the optional --simplex-grid pass.
-# Importing them at module load (not under a flag) keeps the import path
-# obvious; they're cheap and dependency-free of any client/credential.
 from scaling_reranked_retrieval.adapters.retrieval.rsf import fuse_rsf  # noqa: E402
 from scaling_reranked_retrieval.adapters.retrieval.rrf import fuse_rrf  # noqa: E402
 from scaling_reranked_retrieval.adapters.retrieval.models import RerankItem as _RerankItem  # noqa: E402
@@ -94,37 +40,20 @@ from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
-# --------------------------------------------------------------------------- #
-# Configuration (mirrors run_experiment.py)                                    #
-# --------------------------------------------------------------------------- #
-
-# DATASETS and get_results_dir are imported from scaling_reranked_retrieval.config (above) so the
-# (qab dataset, Weaviate collection, results dir) registry has a single source
-# of truth. DATASETS values are DatasetConfig instances.
-
-# Datasets with a reranked_k=100 sweep (extra R@50 / R@100 oracle + union).
+# Datasets with a reranked_k=100 sweep (extra R@50 / R@100).
 RK100_DATASETS = {"biology", "psychology", "robotics", "irpapers_text"}
 
 K_VALUES = (100, 200, 500, 1000, 2000)
-RERANKED_K = 20  # deployed output cap; oracle/singletons comparable to runs/.
+RERANKED_K = 20  # deployed output cap; comparable to runs/.
 
-# Menu of reranked configurations over which oracle-config takes the per-query
-# max. Currently the 29 conditions evaluated in run_search_eval — 3 singletons
-# + 26 fusion blends — minus the no-rerank hybrid baseline. Widen by editing
-# this one line; the analysis automatically adopts whatever conditions are in
-# src.conditions.CONDITIONS (which is the same list run_search_eval consumes).
+# 29-condition oracle-config menu: 3 singletons + 26 fusion blends, no hybrid_only.
 ORACLE_CONFIG_MENU: tuple = tuple(c for c in _RE_CONDITIONS if c.name != "hybrid_only")
 
-# Optional --simplex-grid pass: weight-vector resolution on the 3-simplex.
-# Step 0.05 → 21 ticks per axis → 231 weight vectors total (the triangular
-# number C(22,2)). Halving the step quadruples grid size; the trade-off is
-# wall-time vs how thin a recall@K plateau the grid can resolve.
-SIMPLEX_STEP = 0.05
-RRF_K0 = 60  # matches the constant baked into run_experiment / DerivedSearchAgent
+SIMPLEX_STEP = 0.05  # 3-simplex grid step → 231 weight vectors
+RRF_K0 = 60  # matches run_experiment / DerivedSearchAgent
 RERANKED_K_100 = 100  # extended cap for R@50 / R@100 on RK100 datasets.
 TOP_M = (5, 20, 100)
 
-# Extra metrics available only at output cap 100.
 CAP100_METRICS = ("recall_at_50", "recall_at_100")
 
 BASELINE_CONDITION = "hybrid_only"
@@ -138,19 +67,7 @@ def _oracle_config_for_query(
     reranked_k_for_oc: int,
     metric_keys: Sequence[str],
 ) -> dict[str, float]:
-    """Per-query oracle-config: max metric over ORACLE_CONFIG_MENU rankings.
-
-    For each menu condition c, materialize the top-`reranked_k_for_oc` ranking
-    via DerivedSearchAgent at the given retrieved_k, then compute every metric
-    in metric_keys on that ranking and keep the per-metric max across conditions.
-    Each pick is a rank-respecting top-K block from a real reranked configuration
-    we actually ran — so the value is achievable by a perfect per-query
-    selector over the menu (deployable in principle: train a classifier to
-    select the config per query).
-
-    qab's calculate_recall_at_k / nDCG_at_k slice internally to k, so a longer
-    ranked list than the target metric K is fine.
-    """
+    """Per-query oracle-config: per-metric max over ORACLE_CONFIG_MENU rankings."""
     per_metric_max: dict[str, float] = {m: -1.0 for m in metric_keys}
     for cond in ORACLE_CONFIG_MENU:
         agent = DerivedSearchAgent(
@@ -168,12 +85,7 @@ def _oracle_config_for_query(
 
 
 def _simplex_grid_points(step: float) -> list[tuple[float, float, float]]:
-    """Enumerate (w_c, w_v, w_z) on the 3-simplex with the given step.
-
-    Step 0.05 yields 231 points = C(22, 2). Each weight is a multiple of step
-    in [0, 1], with the three summing exactly to 1 (modulo float rounding,
-    which we resolve by rounding the third weight).
-    """
+    """Enumerate (w_c, w_v, w_z) on the 3-simplex with the given step."""
     n_steps = int(round(1.0 / step))
     out: list[tuple[float, float, float]] = []
     for i in range(n_steps + 1):
@@ -186,13 +98,7 @@ def _simplex_grid_points(step: float) -> list[tuple[float, float, float]]:
 def _rerank_items_from_pool(
     cache_entry: dict, pool: list[str], provider: str
 ) -> list[_RerankItem]:
-    """Build the RerankItem list a library fuse_* function expects.
-
-    `index` is a positional index into `pool` (the top-N hybrid order) so that
-    the fused RerankItem.index can be resolved back to a doc-id via pool[idx].
-    Providers with missing scores for some doc contribute that doc's `0.0`,
-    which is what DerivedSearchAgent's inline fusion would also do.
-    """
+    """Build RerankItem list; `index` is positional into `pool` for doc-id resolution."""
     scores = cache_entry.get(f"{provider}_scores", {}) or {}
     items: list[_RerankItem] = []
     for i, doc_id in enumerate(pool):
@@ -214,19 +120,14 @@ def _simplex_grid_oracle(
 ) -> dict[str, dict[str, float]]:
     """Per-query max over a 3-simplex grid of RSF and RRF weight vectors.
 
-    Returns {"rsf": {metric: max}, "rrf": {metric: max}, "max": {metric: max}}.
-    Calls the retrieval-layer fuse_rsf and fuse_rrf so fusion semantics match the
-    experiment exactly. RSF normalization is implicit in fuse_rsf (it re-does
-    min-max on the input set, which here is the top-`retrieved_k` pool). RRF
-    uses RRF_K0 = 60 to match the experiment.
+    Uses the retrieval-layer fuse_rsf/fuse_rrf so fusion semantics match the
+    experiment exactly (RRF_K0=60).
     """
     entry = cache.queries.get(query, {})
     pool = entry.get("hybrid_order", [])[:retrieved_k]
     if not pool:
         return {kind: {m: 0.0 for m in metric_keys} for kind in ("rsf", "rrf", "max")}
 
-    # Pre-build per-provider RerankItem lists once; library fuse_* will slice
-    # by union of indices internally.
     per_provider_items = {
         p: _rerank_items_from_pool(entry, pool, p) for p in PROVIDERS
     }
@@ -235,8 +136,6 @@ def _simplex_grid_oracle(
 
     for w_c, w_v, w_z in _simplex_grid_points(step):
         weights = {"cohere": w_c, "voyage": w_v, "zerank": w_z}
-        # Skip degenerate all-zero (shouldn't happen with step=0.05 since one
-        # weight will be 1.0 in that case, but defensive).
         if w_c + w_v + w_z == 0.0:
             continue
         for kind, fuser in (("rsf", lambda r, k, w: fuse_rsf(r, top_k=k, weights=w)),
@@ -252,19 +151,12 @@ def _simplex_grid_oracle(
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Per-query ranking materialization (byte-identical to the derive path)        #
-# --------------------------------------------------------------------------- #
-
-
 def _full_rankings(
     cache: ScoreCache, query: str, k: int, present: list[str]
 ) -> dict[str, list[str]]:
-    """Full ranking of the top-k hybrid pool per present provider.
+    """Full ranking of the top-k hybrid pool per provider (reranked_k=k).
 
-    reranked_k is set to k so the agent returns the entire sorted pool (not the
-    deployed top-20). Tie-break is (score desc, hybrid rank asc), exactly as in
-    DerivedSearchAgent (stable sort over a pool-ordered dict).
+    Tie-break is (score desc, hybrid rank asc), exactly as in DerivedSearchAgent.
     """
     out: dict[str, list[str]] = {}
     for r in present:
@@ -278,11 +170,6 @@ def _full_rankings(
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Core statistics over the intersection set                                    #
-# --------------------------------------------------------------------------- #
-
-
 def _jaccard(a: list[str], b: list[str]) -> float:
     sa, sb = set(a), set(b)
     union = sa | sb
@@ -293,29 +180,21 @@ def compute_k_stats(
     cache: ScoreCache, qs: QuerySet, k: int, include_cap100: bool,
     simplex_grid: bool = False,
 ) -> dict:
-    """Compute every spec-4 statistic for one retrieved_k over the intersection.
-
-    `simplex_grid=True` adds the optional second pass: per-query 3-simplex
-    grid sweep over RSF and RRF weight vectors (231 points at step 0.05),
-    reported as `oracle_fusion_grid` in the output.
-    """
+    """Compute all agreement/oracle statistics for one retrieved_k over the intersection."""
     queries = list(qs.gold.keys())
     n = len(queries)
     pairs = [("cohere", "voyage"), ("cohere", "zerank"), ("voyage", "zerank")]
 
-    # Accumulators -------------------------------------------------------- #
     rank1_pair = {f"{a}_{b}": 0 for a, b in pairs}
     rank1_three = 0
     jaccard_sum = {m: {f"{a}_{b}": 0.0 for a, b in pairs} for m in TOP_M}
     jaccard_count = {m: 0 for m in TOP_M}
     tau_sum = {f"{a}_{b}": 0.0 for a, b in pairs}
     venn = {cell: 0 for cell in _venn_cells()}
-    # Conditional precision buckets.
     agree_correct = 0
     agree_n = 0
     disagree_prec_sum = 0.0
     disagree_n = 0
-    # Oracle accumulators.
     cap20 = list(CAP20_METRICS)
     oracle_sum = {mname: 0.0 for mname in cap20}
     singleton_sum_cap20 = {r: {mname: 0.0 for mname in cap20} for r in PROVIDERS}
@@ -323,20 +202,14 @@ def compute_k_stats(
     oracle_sum_cap100 = {mname: 0.0 for mname in cap100}
     singleton_sum_cap100 = {r: {mname: 0.0 for mname in cap100} for r in PROVIDERS}
 
-    # Oracle-config accumulators (spec 4.7, replaces oracle-merge). Per query,
-    # take max over the 29-condition menu of each condition's metric on its
-    # rank-respecting top-K output. cap-20 metrics use a top-20 ranking; cap-100
-    # metrics use a top-100 ranking (RK100 datasets only).
     oracle_config_sum_cap20 = {mname: 0.0 for mname in cap20}
     oracle_config_sum_cap100 = {mname: 0.0 for mname in cap100}
     reranked_for_oc_cap20 = min(RERANKED_K, k)
     reranked_for_oc_cap100 = min(RERANKED_K_100, k)
 
-    # Optional simplex-grid accumulators (off unless simplex_grid=True).
     fg_metric_keys = cap20 + (cap100 if include_cap100 else [])
     fg_kinds = ("rsf", "rrf", "max")
-    # For simplex grid the output cap matches oracle-config so the two are
-    # directly comparable: top-100 on RK100, top-20 otherwise.
+    # Simplex-grid output cap matches oracle-config so the two are directly comparable.
     fg_output_k = reranked_for_oc_cap100 if include_cap100 else reranked_for_oc_cap20
     fusion_grid_sum: Optional[dict[str, dict[str, float]]] = (
         {kind: {m: 0.0 for m in fg_metric_keys} for kind in fg_kinds}
@@ -350,7 +223,6 @@ def compute_k_stats(
 
         top1 = {r: rankings[r][0] for r in PROVIDERS}
 
-        # 4.1 rank-1 agreement
         for a, b in pairs:
             if top1[a] == top1[b]:
                 rank1_pair[f"{a}_{b}"] += 1
@@ -358,7 +230,6 @@ def compute_k_stats(
         if all_agree:
             rank1_three += 1
 
-        # 4.2 top-m Jaccard (skip m > k)
         for m in TOP_M:
             if m > k:
                 continue
@@ -368,11 +239,8 @@ def compute_k_stats(
                     rankings[a][:m], rankings[b][:m]
                 )
 
-        # 4.3 full-pool Kendall tau-b. A provider's score map can occasionally
-        # cover a slightly different doc set than the hybrid pool (a chunk
-        # boundary or per-doc filter drops one), so align over the docs ALL
-        # THREE scored, taken in stable hybrid-rank order. In the common case
-        # this is the entire pool.
+        # Kendall tau-b aligned over docs all three providers scored, in stable
+        # hybrid-rank order (score maps can miss the odd pool doc).
         scored_sets = {r: set(rankings[r]) for r in PROVIDERS}
         common = scored_sets["cohere"] & scored_sets["voyage"] & scored_sets["zerank"]
         common_ordered = [d for d in rankings["cohere"] if d in common]
@@ -382,15 +250,12 @@ def compute_k_stats(
         }
         for a, b in pairs:
             tau = float(kendalltau(score_arrays[a], score_arrays[b]).correlation)
-            # kendalltau returns nan only for degenerate (constant) inputs;
-            # treat that as zero correlation so the mean stays well-defined.
+            # nan (constant input) counts as zero so the mean stays well-defined.
             tau_sum[f"{a}_{b}"] += 0.0 if tau != tau else tau
 
-        # 4.4 Venn: subset of providers whose top-1 is in gold
         correct = frozenset(r for r in PROVIDERS if top1[r] in gold)
         venn[_venn_key(correct)] += 1
 
-        # 4.5 conditional top-1 precision
         if all_agree:
             agree_n += 1
             if top1["cohere"] in gold:
@@ -401,14 +266,12 @@ def compute_k_stats(
                 PROVIDERS
             )
 
-        # 4.6 oracle selector + per-singleton metrics at cap 20
         for mname in cap20:
             per_r = {r: _metric(mname, gold_list, rankings[r][:RERANKED_K]) for r in PROVIDERS}
             oracle_sum[mname] += max(per_r.values())
             for r in PROVIDERS:
                 singleton_sum_cap20[r][mname] += per_r[r]
 
-        # cap-100 singleton + oracle metrics (RK100 datasets only).
         if include_cap100:
             for mname in cap100:
                 per_r = {
@@ -419,11 +282,6 @@ def compute_k_stats(
                 for r in PROVIDERS:
                     singleton_sum_cap100[r][mname] += per_r[r]
 
-        # 4.7 oracle-config — per-query max over the ORACLE_CONFIG_MENU of each
-        # menu condition's metric on its rank-respecting top-K ranking. Each
-        # menu pick is a real reranked configuration we ran, so the ceiling is
-        # achievable by a perfect per-query selector over the menu (whereas
-        # oracle-merge's union credit was not — see module docstring).
         oc_cap20 = _oracle_config_for_query(
             cache, text, gold_list, k, reranked_for_oc_cap20, cap20
         )
@@ -436,7 +294,6 @@ def compute_k_stats(
             for mname in cap100:
                 oracle_config_sum_cap100[mname] += oc_cap100[mname]
 
-        # Optional simplex-grid: per-query best over 231 weight vectors × {RSF, RRF}.
         if simplex_grid and fusion_grid_sum is not None:
             grid_max = _simplex_grid_oracle(
                 cache, text, gold_list, k, fg_output_k, fg_metric_keys
@@ -445,7 +302,6 @@ def compute_k_stats(
                 for m in fg_metric_keys:
                     fusion_grid_sum[kind][m] += grid_max[kind][m]
 
-    # Assemble means ------------------------------------------------------ #
     def mean(x: float) -> float:
         return x / n if n else 0.0
 
@@ -483,7 +339,6 @@ def compute_k_stats(
             for r in PROVIDERS
         },
     }
-    # Fusion headroom + unreachable (derived from Venn).
     stats["venn"]["fusion_headroom"] = mean(
         sum(venn[k_] for k_ in venn if 0 < len(_venn_unkey(k_)) < len(PROVIDERS))
     )
@@ -513,20 +368,12 @@ def compute_k_stats(
     return stats
 
 
-# --------------------------------------------------------------------------- #
-# Venn helpers                                                                  #
-# --------------------------------------------------------------------------- #
-
-
 def _venn_cells() -> list[str]:
     """Eight Venn cell keys: none, c, v, z, cv, cz, vz, cvz (PROVIDERS order)."""
     letters = [PROV_LETTER[p] for p in PROVIDERS]
     cells = ["none"]
-    # singletons
     cells += letters
-    # pairs
     cells += ["".join([letters[i], letters[j]]) for i in range(3) for j in range(i + 1, 3)]
-    # triple
     cells += ["".join(letters)]
     return cells
 
@@ -551,19 +398,9 @@ def _venn_report(venn: dict[str, int], n: int) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Comparison values from existing runs/ files (self-containment, spec 7)        #
-# --------------------------------------------------------------------------- #
-
-
 def find_runs_file(dataset_slug: str, k: int) -> Optional[Path]:
-    """Locate the runs summary for (dataset, k), preferring a from_k2000 file.
-
-    R@1/R@5/R@20/nDCG@10 are byte-identical across cache provenance and output
-    cap, so any matching file serves for those; rk100 files additionally carry
-    R@50 / R@100. Preference order keeps the regression guard pointed at the
-    from_k2000 numbers the spec names.
-    """
+    """Locate the runs summary for (dataset, k), preferring the from_k2000 file
+    the regression guard compares against."""
     rd = get_results_dir(dataset_slug)
     candidates = [
         rd / "runs" / f"k{k}_from_k{CACHE_K}.json",
@@ -572,7 +409,6 @@ def find_runs_file(dataset_slug: str, k: int) -> Optional[Path]:
     for c in candidates:
         if c.exists():
             return c
-    # Fall back to any provenance for this k.
     for sub in ("runs", "runs_rk100"):
         matches = sorted((rd / sub).glob(f"k{k}_from_k*.json")) if (rd / sub).exists() else []
         if matches:
@@ -618,18 +454,9 @@ def extract_comparison(runs_path: Optional[Path], include_cap100: bool) -> dict:
     return comparison
 
 
-# --------------------------------------------------------------------------- #
-# Regression guard + invariants (spec 9)                                        #
-# --------------------------------------------------------------------------- #
-
-
 def regression_singletons(cache: ScoreCache, qs: QuerySet, k: int) -> dict:
-    """Recompute each singleton's cap-20 metrics over that provider's OWN set.
-
-    This reproduces what run_search_eval evaluated (full dataset, queries where
-    the provider's score map is missing get dropped), so the numbers should
-    match runs/k{N}_from_k2000.json exactly (spec 9.3).
-    """
+    """Recompute each singleton's cap-20 metrics over that provider's own set;
+    must match runs/k{N}_from_k2000.json exactly (regression guard)."""
     out: dict[str, dict] = {}
     for r in PROVIDERS:
         own = qs.present_by_provider[r]
@@ -652,14 +479,8 @@ def regression_singletons(cache: ScoreCache, qs: QuerySet, k: int) -> dict:
 
 
 def _drop_tolerance(stats: dict) -> float:
-    """Max-bias tolerance for denominator mismatch between runs/ best_fusion
-    (averaged over each condition's own present-query set, up to len(cache)
-    queries) and oracle_config (averaged over the all-three-present intersection
-    set). Equals max_dropped / n_intersection — the biggest possible bias if
-    every dropped query had recall 1.0 on the runs/ side.
-
-    `stats` carries `_n_drops_max` set by analyze_dataset_k.
-    """
+    """Denominator-mismatch tolerance (runs/ own-set vs intersection averaging):
+    max_dropped / n_intersection. `stats` carries `_n_drops_max`."""
     n_int = stats.get("num_queries_intersection", 0)
     max_drop = stats.get("_n_drops_max", 0)
     return (max_drop / n_int) if n_int > 0 else 0.0
@@ -671,18 +492,10 @@ def check_invariants(
     comparison: Optional[dict] = None,
     prior_oracle_merge: Optional[dict] = None,
 ) -> list[str]:
-    """Return a list of invariant-violation messages (empty == all pass).
-
-    `comparison` carries best-fusion values from runs/ for the oracle-config >=
-    best-fusion invariant; if absent, that check is skipped. `prior_oracle_merge`
-    carries the previous oracle-merge values read from the existing JSON (before
-    overwrite) for the one-time regression sanity bound; absent on fresh
-    installs.
-    """
+    """Return a list of invariant-violation messages (empty == all pass)."""
     errs: list[str] = []
     n = stats["num_queries_intersection"]
 
-    # All agreement values in [0, 1].
     for pair, v in stats["rank1_agreement"].items():
         if not (0.0 <= v <= 1.0):
             errs.append(f"rank1_agreement[{pair}]={v} out of [0,1]")
@@ -691,12 +504,11 @@ def check_invariants(
             if not (0.0 <= v <= 1.0):
                 errs.append(f"jaccard@{m}[{pair}]={v} out of [0,1]")
 
-    # Venn cells sum to the intersection query count.
     cell_total = sum(stats["venn"]["counts"].values())
     if cell_total != n:
         errs.append(f"venn cells sum {cell_total} != intersection n {n}")
 
-    # Oracle-selector R@1 == 1 - venn[none] exactly (spec 9.2, unchanged).
+    # Oracle-selector R@1 must equal 1 - venn[none] exactly.
     oracle_r1 = stats["oracle_selector"]["avg_recall_at_1"]
     none_frac = stats["venn"]["fractions"]["none"]
     if abs(oracle_r1 - (1.0 - none_frac)) > 1e-9:
@@ -704,7 +516,6 @@ def check_invariants(
             f"oracle_selector R@1 {oracle_r1} != 1 - venn[none] {1.0 - none_frac}"
         )
 
-    # Oracle-selector >= every singleton on every cap-20 metric.
     for m in CAP20_METRICS:
         omet = stats["oracle_selector"][f"avg_{m}"]
         for r in PROVIDERS:
@@ -712,24 +523,15 @@ def check_invariants(
             if omet < smet - 1e-9:
                 errs.append(f"oracle_selector {m} {omet} < singleton {r} {smet}")
 
-    # Oracle-config@K >= oracle-selector@K — the singletons are in the menu, so
-    # the per-query max over the menu can only dominate the per-query best
-    # singleton. (Equality when the per-query best is always a pure singleton.)
+    # Singletons are in the menu, so oracle-config >= oracle-selector.
     for m in CAP20_METRICS:
         oc = stats["oracle_config"][f"avg_{m}"]
         os_ = stats["oracle_selector"][f"avg_{m}"]
         if oc < os_ - 1e-9:
             errs.append(f"oracle_config {m} {oc} < oracle_selector {m} {os_}")
 
-    # Oracle-config@K >= best static fusion — a single fixed fusion config is
-    # one of the menu picks for every query, so picking per-query can only
-    # dominate the population-best static config. Caveat: the runs/ best_fusion
-    # averages over each condition's own present-query set (the queries where
-    # that condition could be scored), but oracle_config averages over the
-    # all-three-present intersection. A no-{dropped-provider} fusion sees more
-    # queries than the intersection, which can put it above oracle_config purely
-    # from denominator mismatch. We absorb that with a tolerance equal to the
-    # max-drop fraction (the largest possible bias from N missing queries).
+    # Oracle-config >= best static fusion, up to a tolerance absorbing the
+    # denominator mismatch (runs/ own-set vs intersection averaging).
     if comparison and comparison.get("best_fusion"):
         denom_tol = _drop_tolerance(stats)
         for m in CAP20_METRICS:
@@ -742,13 +544,8 @@ def check_invariants(
                     f"oracle_config {m} {oc} < best static fusion {bf['condition']} {bf['value']} (denom_tol={denom_tol:.4f})"
                 )
 
-    # Regression sanity (one-time, this rewrite only). A rank-respecting
-    # selection cannot exceed the loose set-union ceiling that the prior
-    # oracle-merge computation reported at the same cell. We log where this
-    # binds (oracle-config equal to or within noise of the old ceiling), since
-    # that signals a query where the rank-respecting pick exhausted the
-    # diversity that the union credit was reading. Absence of priors is fine
-    # (fresh install).
+    # Sanity: rank-respecting oracle-config cannot exceed the prior set-union
+    # oracle-merge ceiling.
     if prior_oracle_merge:
         oc20 = stats["oracle_config"]["avg_recall_at_20"]
         pom20 = prior_oracle_merge.get("at_20")
@@ -758,7 +555,6 @@ def check_invariants(
             )
 
     if include_cap100:
-        # Oracle-selector >= cap-100 singletons.
         for m in CAP100_METRICS:
             omet = stats["oracle_selector_cap100"][f"avg_{m}"]
             for r in PROVIDERS:
@@ -767,7 +563,6 @@ def check_invariants(
                     errs.append(
                         f"oracle_selector_cap100 {m} {omet} < singleton {r} {smet}"
                     )
-        # Oracle-config@{50,100} >= oracle-selector@{50,100}.
         for m in CAP100_METRICS:
             oc = stats["oracle_config_cap100"][f"avg_{m}"]
             os_ = stats["oracle_selector_cap100"][f"avg_{m}"]
@@ -775,8 +570,6 @@ def check_invariants(
                 errs.append(
                     f"oracle_config_cap100 {m} {oc} < oracle_selector_cap100 {m} {os_}"
                 )
-        # Oracle-config_cap100 >= best static fusion at cap-100 metrics; same
-        # denominator-mismatch tolerance as the cap-20 case above.
         if comparison and comparison.get("best_fusion"):
             denom_tol = _drop_tolerance(stats)
             for m in CAP100_METRICS:
@@ -788,7 +581,6 @@ def check_invariants(
                     errs.append(
                         f"oracle_config_cap100 {m} {oc} < best fusion {bf['condition']} {bf['value']} (denom_tol={denom_tol:.4f})"
                     )
-        # Regression sanity at cap 100 (one-time).
         if prior_oracle_merge:
             for K, mname in zip((50, 100), CAP100_METRICS):
                 pomK = prior_oracle_merge.get(f"at_{K}")
@@ -800,7 +592,6 @@ def check_invariants(
                         f"oracle_config_cap100 {mname} {ocK} > prior oracle_merge@{K} {pomK}"
                     )
 
-    # Optional simplex-grid invariant: grid max >= best static fusion.
     if "oracle_fusion_grid" in stats and comparison and comparison.get("best_fusion"):
         max_metrics = stats["oracle_fusion_grid"]["metrics"]["max"]
         for m in CAP20_METRICS:
@@ -816,18 +607,8 @@ def check_invariants(
     return errs
 
 
-# --------------------------------------------------------------------------- #
-# Driver: one (dataset, k) cell                                                #
-# --------------------------------------------------------------------------- #
-
-
 def _read_prior_oracle_merge(dataset_slug: str, k: int) -> Optional[dict]:
-    """Read prior oracle_merge values from the existing JSON file (if any).
-
-    Used for the one-time regression sanity check oracle-config <= prior
-    oracle-merge. After this run overwrites the file the values are gone, but
-    they served their purpose. Returns a dict keyed by f"at_{K}" or None.
-    """
+    """Read prior oracle_merge values from the existing JSON, keyed by f"at_{K}"."""
     path = (
         get_results_dir(dataset_slug)
         / "extras"
@@ -887,23 +668,18 @@ def analyze_dataset_k(
 ) -> dict:
     """Run one (dataset, k) cell.
 
-    `read_prior=False` disables the regression-vs-prior-oracle-merge sanity
-    check. The prior values are aggregates over the full intersection query
-    set, so they are not comparable when analyzing a subset (smoke test).
+    read_prior=False skips the prior-oracle-merge sanity check (priors are
+    full-intersection aggregates, not comparable on smoke subsets).
     """
     _cfg = DATASETS[dataset_slug]
     dataset_name, collection_name = _cfg.qab_name, _cfg.collection
     include_cap100 = dataset_slug in RK100_DATASETS
 
-    # Read prior oracle_merge values BEFORE overwriting the JSON, for the
-    # one-time regression sanity check.
+    # Must read prior values before this run overwrites the JSON.
     prior_oracle_merge = _read_prior_oracle_merge(dataset_slug, k) if read_prior else None
 
     stats = compute_k_stats(cache, qs, k, include_cap100, simplex_grid=simplex_grid)
-    # Denominator-mismatch tolerance for oracle_config >= best_fusion: the
-    # largest single-provider drop count, expressed as a fraction of the
-    # intersection size. Carried in stats so check_invariants can read it
-    # without re-plumbing qs through every helper.
+    # Basis for the denominator-mismatch tolerance in check_invariants.
     stats["_n_drops_max"] = max((len(v) for v in qs.drops.values()), default=0)
     regression = regression_singletons(cache, qs, k)
     runs_path = find_runs_file(dataset_slug, k)
@@ -912,7 +688,6 @@ def analyze_dataset_k(
         stats, include_cap100, comparison=comparison,
         prior_oracle_merge=prior_oracle_merge,
     )
-    # Strip the internal field — not part of the public JSON schema.
     stats.pop("_n_drops_max", None)
     _log_regression_tightness(dataset_slug, k, stats, prior_oracle_merge)
 
@@ -948,17 +723,11 @@ def analyze_dataset_k(
     return payload
 
 
-# --------------------------------------------------------------------------- #
-# AGREEMENT.md report (spec 7)                                                  #
-# --------------------------------------------------------------------------- #
-
-
 def _f(x: Optional[float]) -> str:
     return "n/a" if x is None else f"{x:.3f}"
 
 
 def _cell(d: Optional[dict]) -> str:
-    """Format a {condition, value} comparison cell."""
     if not d:
         return "n/a"
     return f"{d['value']:.3f} (`{d['condition']}`)"
@@ -982,7 +751,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
     )
     A("")
 
-    # Table 1: rank-1 agreement at k=2000 ------------------------------------
     A("## 1. Rank-1 agreement at k=2000")
     A("")
     A("Fraction of queries where the two rerankers' top-1 doc is identical "
@@ -1002,7 +770,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
         )
     A("")
 
-    # Table 2: Venn decomposition at k=2000 ----------------------------------
     A("## 2. R@1 correctness Venn decomposition at k=2000")
     A("")
     A("Fraction of queries by which subset of rerankers placed a gold doc at "
@@ -1025,7 +792,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
         )
     A("")
 
-    # Table 3: conditional top-1 precision -----------------------------------
     A("## 3. Conditional top-1 precision at k=2000 (agree vs disagree)")
     A("")
     A("`agree` = P(top-1 in gold | all three top-1 identical). `disagree` = "
@@ -1049,7 +815,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
         )
     A("")
 
-    # Table 4: oracle-selector + oracle-config + realized fusion at k=2000 ---
     A("## 4. Oracle selector vs oracle-config vs realized fusion (k=2000)")
     A("")
     A("Per metric, side-by-side: hybrid baseline, best singleton, best static "
@@ -1121,7 +886,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
             )
         A("")
 
-    # Appendix: oracle at other k --------------------------------------------
     A("## 5. Rank-1 agreement vs depth (per dataset, all k)")
     A("")
     A("Pairwise rank-1 agreement at each retrieved_k. The hypothesis: Cohere's "
@@ -1148,7 +912,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
             )
         A("")
 
-    # Appendix: oracle gap at all k ------------------------------------------
     A("## 6. Oracle gap appendix (oracle selector − best static fusion)")
     A("")
     A("Oracle R@1 / R@20 minus the best static fusion at the same cell — the "
@@ -1180,11 +943,6 @@ def write_agreement_md(all_payloads: dict[str, dict[int, dict]]) -> Path:
     out_path.write_text("\n".join(lines))
     print(f"Wrote {out_path}")
     return out_path
-
-
-# --------------------------------------------------------------------------- #
-# CLI                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:
@@ -1248,7 +1006,6 @@ def run_smoke() -> None:
         raise SystemExit("Smoke needs the biology k=2000 cache.")
     cache, qs = loaded
 
-    # Restrict the query set to the first 10 intersection queries.
     keep = list(qs.gold.keys())[:10]
     qs.gold = {t: qs.gold[t] for t in keep}
     qs.query_ids = {t: qs.query_ids.get(t, t[:64]) for t in keep}
@@ -1261,23 +1018,18 @@ def run_smoke() -> None:
         dataset_slug, cache, qs, 100, write=False, read_prior=False,
     )
 
-    # Hard invariant asserts (spec 9.4).
     assert payload["invariants_ok"], payload["invariant_errors"]
     n = payload["num_queries_intersection"]
     assert n == len(keep), f"expected {len(keep)} queries, got {n}"
-    # Jaccard of a list with itself is 1.0 — sanity-check via a manual pair.
     text = keep[0]
     rk = _full_rankings(cache, text, 100, list(PROVIDERS))
     for r in PROVIDERS:
         assert _jaccard(rk[r][:20], rk[r][:20]) == 1.0
-    # Venn counts sum to n.
     assert sum(payload["venn"]["counts"].values()) == n
-    # Oracle-config >= oracle-selector >= singletons (echo of invariants).
     for m in CAP20_METRICS:
         os_ = payload["oracle_selector"][f"avg_{m}"]
         oc = payload["oracle_config"][f"avg_{m}"]
         assert oc >= os_ - 1e-9, f"oracle_config {m} {oc} < oracle_selector {m} {os_}"
-    # Oracle-config >= best static fusion (where comparison is available).
     comp = payload.get("comparison_from_runs", {}) or {}
     bf = comp.get("best_fusion") or {}
     for m in CAP20_METRICS:
@@ -1287,7 +1039,6 @@ def run_smoke() -> None:
             assert oc >= rec["value"] - 1e-9, (
                 f"oracle_config {m} {oc} < best static fusion {rec['condition']} {rec['value']}"
             )
-    # Oracle-selector R@1 == 1 - venn[none].
     assert abs(payload["oracle_selector"]["avg_recall_at_1"]
                - (1.0 - payload["venn"]["fractions"]["none"])) < 1e-9
 

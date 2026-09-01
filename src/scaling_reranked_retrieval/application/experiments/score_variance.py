@@ -1,29 +1,6 @@
-"""Measure inference-time score variance for Cohere, Voyage, and ZeroEntropy
-rerankers on a few (query, top-1 hybrid doc) pairs.
-
-Why: all three are hosted cross-encoder APIs scoring each (q, d) pair
-independently. They *should* be deterministic, but in practice hosted models
-can exhibit small fluctuations (batch effects, fp16 nondeterminism, server
-swaps). This script quantifies that.
-
-What it does:
-    1. Loads a score cache (default: results/bright_biology/caches/k500.json)
-       to pick sample queries — same queries the main experiment ranks against.
-    2. For each sampled query, opens a Weaviate hybrid search and grabs the
-       top-1 document's content. (Cheaper and simpler than caching content.)
-    3. For each (query, doc) pair, calls each provider --trials times
-       sequentially and records the raw relevance scores.
-    4. Prints per-(query, provider) stats: mean, std, min, max, range.
-    5. Writes raw scores + stats to
-       results/bright_biology/extras/score_variance.json.
-
-Usage:
-    export WEAVIATE_URL=... WEAVIATE_API_KEY=...
-    export COHERE_API_KEY=... VOYAGE_API_KEY=... ZERANK_API_KEY=...
-
-    uv run python scripts/score_variance.py
-    uv run python scripts/score_variance.py --queries 3 --trials 20
-"""
+"""Measure inference-time score variance of the three hosted rerankers on
+(query, top-1 hybrid doc) pairs; writes raw scores + stats to
+extras/score_variance.json."""
 from __future__ import annotations
 
 import argparse
@@ -140,7 +117,6 @@ async def main_async(args) -> None:
     n = min(args.queries, len(all_queries))
     sampled = random.sample(all_queries, n)
 
-    # Weaviate (for fetching top-1 doc content)
     headers = get_embedding_headers(EMBEDDING_MODEL)
     wv = weaviate.use_async_with_weaviate_cloud(
         cluster_url=os.environ["WEAVIATE_URL"],
@@ -150,7 +126,6 @@ async def main_async(args) -> None:
     )
     await wv.connect()
 
-    # Reranker clients
     cohere_client = get_cohere_async_client().client
     voyage_client = get_voyage_async_client().client
     zerank_client = get_zerank_async_client().client
@@ -185,7 +160,7 @@ async def main_async(args) -> None:
                 print(f"  skipping — empty content for {doc_id}")
                 continue
 
-            # Optionally cross-check against cache's hybrid top-1 (informational).
+            # Informational cross-check vs the cache's hybrid top-1.
             cache_top = cache.queries[query]["hybrid_order"][0]
             if cache_top != doc_id:
                 print(
@@ -193,8 +168,8 @@ async def main_async(args) -> None:
                     "— hybrid isn't fully deterministic; using fresh top-1"
                 )
 
-            # Run providers in parallel; within each provider, calls are sequential
-            # so we measure single-call variance rather than batched-call variance.
+            # Providers in parallel; calls within a provider stay sequential so
+            # we measure single-call variance, not batched-call variance.
             cohere_scores, voyage_scores, zerank_scores = await asyncio.gather(
                 run_trials(rerank_fns["cohere"], query, content, args.trials),
                 run_trials(rerank_fns["voyage"], query, content, args.trials),
@@ -238,7 +213,6 @@ async def main_async(args) -> None:
         json.dump(output, f, indent=2)
     print(f"\nWrote {args.output}")
 
-    # Aggregate across queries: average stdev per provider
     print("\n=== aggregate (mean stdev across sampled queries) ===")
     for p in ("cohere", "voyage", "zerank"):
         stdevs = [r["stats"][p]["stdev"] for r in output["results"]]

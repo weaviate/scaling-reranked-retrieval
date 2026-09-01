@@ -1,29 +1,6 @@
-"""Ports — the boundary interfaces of the hexagon.
+"""Ports — the structural (typing.Protocol) boundary interfaces of the hexagon.
 
-The application core talks to the outside world only through these shapes.
-They are structural (typing.Protocol): adapters satisfy them by matching the
-shape, no inheritance required, and the pydantic models in
-scaling_reranked_retrieval.adapters.retrieval.models serve as the concrete item types.
-
-Driving port (how the evaluation harness invokes the core):
-
-    SearchAgent — what `query_agent_benchmarking.run_search_eval` calls.
-        Implementations: scaling_reranked_retrieval.adapters.qab.RetrieverSearchAgent (live
-        retrieval+rerank), scaling_reranked_retrieval.application.collect.CollectScoresAgent
-        (live collection into the score cache), and
-        scaling_reranked_retrieval.application.derived.DerivedSearchAgent (cache-only derivation).
-
-Driven ports (what the core needs from infrastructure):
-
-    RerankFn   — a provider rerank callable, as produced by the
-                 make_*_reranker factories in scaling_reranked_retrieval.adapters.retrieval.providers
-                 (Cohere / Voyage / ZeroEntropy behind chunking + byte budgets).
-    Retriever  — first-stage retrieval; implemented by
-                 scaling_reranked_retrieval.adapters.retrieval.base_retriever.BaseRetriever
-                 (Weaviate hybrid search).
-    ScoreStore — per-query reranker-score persistence; implemented by
-                 scaling_reranked_retrieval.adapters.cache.ScoreCache (resumable JSON snapshots
-                 under results/<dataset>/caches/).
+See docs/architecture.md for the implementation catalog.
 """
 from __future__ import annotations
 

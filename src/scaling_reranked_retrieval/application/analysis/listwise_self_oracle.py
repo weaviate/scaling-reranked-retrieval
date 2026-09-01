@@ -1,53 +1,8 @@
 """Self-ensemble oracle — the listwise winner's-curse control (S@1 only).
 
-The trio oracle-selector (analysis/listwise_oracle_routing.py) is a per-query
-max over 3 stochastic rankings, so part of its headroom is selection-on-noise
-(winner's curse), not model diversity. This control isolates that component:
-for each query, select the best ranking among ONE model's 3 trials (default
-gpt-5.6-luna, the strongest singleton — the conservative control, matching
-the CE noise-null's clone-the-strongest-base convention). The self-oracle is
-a max over 3 stochastic outputs with ZERO model diversity, so its lift over
-the model's own single-trial mean is pure sampling luck. Arm count is matched
-by construction: both the trio selector (max over 3 models at one trial) and
-the self-oracle (max over 3 trials of one model) maximize over exactly 3
-rankings.
-
-Per query:
-  - self_oracle(m)   = max over m's trials of S@1        (one number; no
-                       trial axis — the 3 trials are consumed by the max)
-  - self_bias(m)     = self_oracle(m) − mean-over-trials S@1(m)   (>= 0)
-  - oracle_selector  = per-trial max over the models (trial-aligned,
-                       identical to listwise_oracle_routing), mean over trials
-Derived, the quantities the control exists for:
-  - net specialization vs m = oracle_selector − self_oracle(m)
-    Positive by a healthy margin => the trio headroom reflects genuine
-    per-query specialization beyond what max-over-3-samples manufactures;
-    ~0 or negative => the routing ceiling is mostly sampling luck.
-  - trial rank-1 self-agreement(m) — mean pairwise fraction of queries where
-    two trials of m put the same doc at rank 1 (high agreement => small
-    self-oracle lift mechanically; reported to make the bias interpretable).
-
-Metric: Success@1 only (qab's `recall_at_1` hit-rate), matching the routing
-analysis. Aggregation: mean across queries per subset (mean ± std across
-trials where a trial axis exists) → median across subsets.
-
-Caveat (inline in the report too): the self-oracle taps WITHIN-model sampling
-variance while the trio selector taps BETWEEN-model variance at matched arm
-count; if a model's trials are more correlated than distinct models are, the
-self-oracle is a floor on the winner's-curse component, not an unbiased
-estimate of it.
-
-Inputs: the same validated ranking caches as the fusion/routing analyses
-(src.listwise.load_listwise_rankings). Zero LLM calls / zero network.
-
-Outputs: results/listwise/self_oracle/<pool-slug>__first<K>__top<P>/
-    <labels joined by __>__<effort>.json               full per-subset results
-    <labels joined by __>__<effort>__SELF_ORACLE.md    cross-subset report
-
-Usage:
-    uv run python scripts/listwise_self_oracle.py            # the trio, luna control
-    uv run python scripts/listwise_self_oracle.py --control gpt-5.6-terra
-    uv run python scripts/listwise_self_oracle.py --smoke    # biology only
+Per query, max over ONE model's trials: zero model diversity, so its lift over
+the single-trial mean is pure sampling luck. Arm count matches the trio
+selector; if trials are more correlated than models, it is a floor, not unbiased.
 """
 from __future__ import annotations
 
@@ -75,15 +30,10 @@ DEFAULT_MODELS = ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-terra"]
 DEFAULT_CONTROL = "gpt-5.6-luna"
 
 
-# --------------------------------------------------------------------------- #
-# Core                                                                         #
-# --------------------------------------------------------------------------- #
-
-
 def analyze_subset(model_sets: dict[str, ListwiseRankings], trials: int) -> dict:
     """Per-trial singleton + trio-selector S@1 means, plus per-model
-    self-oracle / self-bias / trial rank-1 self-agreement (no trial axis —
-    the trials are consumed by the max / the pairwise comparison)."""
+    self-oracle / self-bias / trial rank-1 self-agreement (trials consumed
+    by the max — no trial axis)."""
     labels = list(model_sets)
     sets_ = list(model_sets.values())
     if any(ms.qids != sets_[0].qids for ms in sets_[1:]):
@@ -130,8 +80,8 @@ def analyze_subset(model_sets: dict[str, ListwiseRankings], trials: int) -> dict
 
 
 def summarize(payload: dict, control: str) -> None:
-    """Attach the derived comparison lines per subset: net specialization vs
-    each model's self-oracle, trio selection headroom, best singleton."""
+    """Attach per-subset derived lines: net specialization, selection headroom,
+    best singleton."""
     for p in payload["per_subset"].values():
         v = p["values"]
         labels = p["labels"]
@@ -150,11 +100,6 @@ def summarize(payload: dict, control: str) -> None:
         v["net_specialization:max_self"] = {
             "mean": sel - v[f"self_oracle:{max_self}"]["mean"], "std": 0.0}
     payload["metadata"]["control"] = control
-
-
-# --------------------------------------------------------------------------- #
-# Report                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def _median(per_subset: dict, key: str, subsets: list[str]) -> float:
@@ -246,11 +191,6 @@ def render_report(payload: dict) -> str:
         "the winner's-curse component, not an unbiased estimate of it.",
     ]
     return "\n".join(lines) + "\n"
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                         #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

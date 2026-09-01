@@ -1,27 +1,6 @@
-"""Adapter for query_agent_benchmarking (qab), the evaluation harness.
-
-Two responsibilities, both about interfacing that one external library:
-
-1. `RetrieverSearchAgent` — wraps a retrieval/ retriever (typically a
-   CrossEncoderReranker configured for a single condition) so it satisfies
-   the SearchAgent protocol expected by `qab.run_search_eval`.
-
-2. `setup()` — runtime guards applied explicitly by every entry module
-   before using qab (never on import of the library, so src stays
-   side-effect-free):
-
-   - `ensure_qab_version()` fails fast if the environment holds qab < 0.7
-     (pyproject pins >=0.7 and uv.lock locks it, so `uv run` already syncs
-     the right version — this guards against invoking a script in a stale
-     environment). The version is read from importlib.metadata, NOT
-     `qab.__version__`, which is a stale constant that wrongly reports
-     "0.5" in the 0.7 release.
-
-   - `patch_qab_loader()` memoizes qab's per-dataset corpus load. qab's
-     load_bright re-materializes the entire BRIGHT corpus (~62k docs for
-     robotics, ~12s) on every run_search_eval call, and a sweep calls it
-     once per condition — memoizing the dispatch loads each dataset at most
-     once per process.
+"""Adapter for query_agent_benchmarking (qab): the SearchAgent bridge plus
+runtime guards (setup() = version check + corpus-loader memoization), applied
+explicitly by entry modules so import stays side-effect-free.
 """
 from __future__ import annotations
 
@@ -41,7 +20,7 @@ _loader_patched = False
 
 
 def ensure_qab_version() -> None:
-    """Enforce query_agent_benchmarking >= 0.7 (see module docstring)."""
+    """Enforce qab >= 0.7 via importlib.metadata (qab.__version__ is a stale constant)."""
     from importlib.metadata import version as _pkg_version
 
     from packaging.version import Version
@@ -55,7 +34,7 @@ def ensure_qab_version() -> None:
 
 
 def patch_qab_loader() -> None:
-    """Memoize qab's per-dataset load (idempotent; see module docstring)."""
+    """Memoize qab's per-dataset corpus load (idempotent; qab reloads it per run_search_eval call)."""
     global _loader_patched
     if _loader_patched:
         return

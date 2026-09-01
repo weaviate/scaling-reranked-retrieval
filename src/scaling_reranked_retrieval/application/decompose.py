@@ -1,14 +1,6 @@
-"""Routing-vs-blending decomposition primitives (paper Section 5.1).
-
-Per query the reranking optimum decomposes into ROUTING (picking the best
-singleton per query) vs BLENDING (picking an interior fusion per query),
-against a BEST-STATIC-FUSION reference (one fixed blend applied everywhere):
-
-    routing_value  = oracle_selector − best_static_fusion
-    blending_value = oracle_config   − oracle_selector
-
-Shared by the oracle_config analysis (the production decomposition) and
-noise_null (the same decomposition over noise-cloned caches).
+"""Routing-vs-blending oracle decomposition over cached scores:
+routing_value = oracle_selector − best_static_fusion;
+blending_value = oracle_config − oracle_selector.
 """
 from __future__ import annotations
 
@@ -17,18 +9,14 @@ from scaling_reranked_retrieval.domain.aggregate import qmean as _qmean
 from scaling_reranked_retrieval.domain.conditions import CONDITIONS, SINGLETON_CONDITIONS
 from scaling_reranked_retrieval.domain.metrics import CAP20_METRICS, metric as _metric
 
-# The oracle menu, matching the run harness exactly (the same CONDITIONS list
-# run_search_eval consumes — equal-weight only), minus the no-rerank hybrid
-# baseline.
+# The run harness's CONDITIONS menu minus the no-rerank hybrid baseline.
 ORACLE_CONFIG_MENU = [c for c in CONDITIONS if c.name != "hybrid_only"]
 SINGLETONS = [c for c in ORACLE_CONFIG_MENU if c.name in SINGLETON_CONDITIONS]
 FUSION_CONFIGS = [c for c in ORACLE_CONFIG_MENU if c.name not in SINGLETON_CONDITIONS]
 
-# Single-config best-static-fusion selection metric (resolved spec decision:
-# one blend, chosen by a primary metric, reused for every metric row).
+# One best-static-fusion blend, chosen by this metric, reused for every metric row.
 SELECTION_METRIC = "recall_at_1"
 
-# Pretty metric labels for the table / JSON (CAP20_METRICS order preserved).
 METRIC_LABEL = {
     "recall_at_1": "R@1",
     "recall_at_5": "R@5",
@@ -42,16 +30,8 @@ def per_query_condition_metrics(
 ) -> tuple[dict[str, dict[str, list[float]]], list[str]]:
     """Materialize every menu condition's metrics for every intersection query.
 
-    Returns (table, queries) where:
-      table[cond_name][metric] = list of per-query values, aligned to `queries`.
-    Each ranking is produced by DerivedSearchAgent at retrieved_k=k (RSF
-    normalization recomputed on the restricted pool) and capped at reranked_k.
-
-    `menu` defaults to the full ORACLE_CONFIG_MENU; pass a subset
-    (e.g. RRF-only / RSF-only) to restrict which conditions are materialized.
-    The noise-null experiment builds the full table once and decomposes it
-    several ways via the `menu`/`singletons`/`fusion_configs` arguments on the
-    functions below.
+    Returns (table, queries): table[cond_name][metric] = per-query values
+    aligned to `queries`. Pass a `menu` subset to restrict conditions.
     """
     queries = list(qs.gold.keys())
     table: dict[str, dict[str, list[float]]] = {
@@ -77,15 +57,8 @@ def _per_query_max(table: dict, names: list[str], metric: str, n: int) -> list[f
 def _decompose(
     table: dict, n: int, bsf_config: str, menu=ORACLE_CONFIG_MENU, singletons=SINGLETONS
 ) -> dict[str, dict[str, float]]:
-    """Per-metric decomposition for one subset given a fixed best-static-fusion.
-
-    Returns {metric_label: {best_static_fusion, oracle_selector, oracle_config,
-    routing_value, blending_value}}.
-
-    `menu`/`singletons` default to the full menu and its three singletons;
-    pass restricted lists (e.g. RRF-only or RSF-only) to decompose the same
-    materialized `table` over a sub-menu.
-    """
+    """Per-metric decomposition for one subset given a fixed best-static-fusion;
+    pass restricted `menu`/`singletons` to decompose over a sub-menu."""
     singleton_names = [c.name for c in singletons]
     menu_names = [c.name for c in menu]
     out: dict[str, dict[str, float]] = {}
@@ -109,14 +82,8 @@ def select_best_static_fusion(
 ) -> tuple[str, float]:
     """Argmax over the fusion blends of the MEAN of SELECTION_METRIC.
 
-    `metric_values_by_config[name]` is the (pooled or per-subset) list of
-    per-query SELECTION_METRIC values for that fusion config. Ties broken by
-    config name for determinism. (Mean, not median: a per-query-recall median
-    is degenerate — see src.aggregate — so a median-based argmax would tie
-    dozens of blends at 0 and pick arbitrarily.)
-
-    `fusion_configs` defaults to all equal-weight blends; pass the RRF-only or
-    RSF-only blend list to select within a single fusion family (noise_null).
+    Mean, not median (per-query-recall median is degenerate); ties broken by
+    config name for determinism.
     """
     scored = [
         (_qmean(metric_values_by_config[c.name]), c.name)

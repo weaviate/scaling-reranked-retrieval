@@ -1,22 +1,10 @@
-"""The experiment's condition menu — equal-weight fusion only.
-
-Menu policy (2026-07-10): the experiments test EQUAL-WEIGHT fusion only. The
-menu is the no-rerank baseline, the three singletons, the three equal-weight
-pairs (x rrf/rsf), and the equal-weight 3-way (x rrf/rsf) — 12 conditions.
-Weighted tilts (0.7/0.3 pairs, 0.5/0.25/0.25 3-ways) were removed from the
-project entirely after the fixed-weight analysis found no tilt beats equal
-beyond noise — no code generates or sweeps tilted conditions.
-"""
+"""The experiment's 12-condition menu — equal-weight fusion only."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-# Mirrors scaling_reranked_retrieval.adapters.retrieval.providers.{Provider,FusionMethod}. Defined
-# locally (types only) because importing anything under
-# src/adapters/retrieval/ triggers its __init__ re-exports, which pull the
-# weaviate client into every consumer — and the domain layer must stay
-# provider-import-free (only scaling_reranked_retrieval.application.collect may import clients).
+# Redefined locally (mirrors adapters.retrieval.providers) so the domain layer stays free of adapter imports.
 Provider = Literal["cohere", "voyage", "zerank", "hybrid"]
 FusionMethod = Literal["rrf", "rsf"]
 
@@ -33,12 +21,7 @@ class Condition:
 
 @dataclass
 class _Condition:
-    """Minimal condition stand-in for ad-hoc derivations.
-
-    Only the attributes DerivedSearchAgent reads are present (no name). Using
-    the real agent (rather than re-implementing the sort) guarantees the pool
-    filtering and tie-breaking match the derive path exactly.
-    """
+    """Minimal condition stand-in for ad-hoc derivations (only the attributes DerivedSearchAgent reads)."""
 
     provider: Optional[str]
     fusion_method: Optional[str] = None
@@ -49,7 +32,6 @@ class _Condition:
 SINGLETON_CONDITIONS = {"cohere_only", "voyage_only", "zerank_only"}
 BASELINE_CONDITION = "hybrid_only"
 
-# Pair families: (name tag, (reranker a, reranker b)), alphabetical within pair.
 _PAIRS = (
     ("cv", ("cohere", "voyage")),
     ("cz", ("cohere", "zerank")),
@@ -68,9 +50,7 @@ def is_equal_weight(condition: Condition) -> bool:
 def build_menu() -> list[Condition]:
     """Generate the 12-condition equal-weight menu.
 
-    Ordering: baselines/singletons, then per pair family (equal rrf, equal
-    rsf), then the equal 3-way (rrf, rsf). Condition names and relative order
-    match every runs file under results/ — do not reorder.
+    Names and relative order match every runs file under results/ — do not reorder.
     """
     menu = [
         Condition("hybrid_only", provider=None),

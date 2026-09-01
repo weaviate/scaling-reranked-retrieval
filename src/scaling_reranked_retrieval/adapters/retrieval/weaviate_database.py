@@ -27,11 +27,6 @@ def weaviate_search_tool(
         )
     collection = weaviate_client.collections.get(collection_name)
 
-    '''
-    TODO: Add Support for Tag Filtering and Target Vectors with something like `**kwargs`
-    if tag_filter_value:
-        filter = Filter.by_property("tags").contains_any([tag_filter_value])
-    '''
     if search_type == "bm25":
         search_results = collection.query.bm25(
             query=query,
@@ -65,8 +60,7 @@ def weaviate_search_tool(
             if obj.properties and target_property_name in obj.properties:
                 content_value = obj.properties[target_property_name]
 
-            # Extract score: BM25 returns score (higher=better),
-            # vector returns distance (lower=better, convert to similarity)
+            # BM25 returns score (higher=better); vector returns distance (converted to similarity).
             if return_score:
                 if search_type == "vector":
                     score = 1.0 - obj.metadata.distance if obj.metadata.distance is not None else None
@@ -104,11 +98,6 @@ async def async_weaviate_search_tool(
         )
         await weaviate_async_client.connect()
     collection = weaviate_async_client.collections.get(collection_name)
-    '''
-    TODO: Add Support for Tag Filtering and Target Vectors with something like `**kwargs`
-    if tag_filter_value:
-        filter = Filter.by_property("tags").contains_any([tag_filter_value])
-    '''
 
     if search_type == "bm25":
         search_results = await collection.query.bm25(
@@ -160,9 +149,7 @@ async def async_weaviate_search_tool(
             ))
     return objects
 
-# Batch size for fetch-by-id lookups. contains_any filters are sent in the
-# request body, so the bound is response size, not filter size; 500 docs of
-# BRIGHT-sized content per response is comfortable.
+# Batch size for fetch-by-id lookups; the bound is response size, not filter size.
 _FETCH_BY_ID_BATCH = 500
 
 
@@ -174,11 +161,8 @@ async def async_fetch_texts_by_id(
 ) -> dict[str, str]:
     """Fetch target_property texts for the given dataset_ids, keyed by id.
 
-    Exact-match lookup: dataset_id is a FIELD-tokenized text property, so
-    contains_any matches whole ids. Ids absent from the collection are
-    simply missing from the result — callers decide whether that is an
-    error. Used by score-collection resume, where the doc pool is fixed by
-    the cache and only texts are needed; no retrieval query is involved.
+    Exact-match lookup (dataset_id is FIELD-tokenized, so contains_any matches
+    whole ids); ids absent from the collection are simply missing from the result.
     """
     collection = weaviate_async_client.collections.get(collection_name)
     texts: dict[str, str] = {}
@@ -212,10 +196,9 @@ def get_tag_values(collection_name: str) -> list[str]:
             min_occurrences=10
         )
     )
-    
-    # Extract tag values from top occurrences
+
     tag_values = [
-        occurrence.value 
+        occurrence.value
         for occurrence in response.properties["tag"].top_occurrences
     ]
 

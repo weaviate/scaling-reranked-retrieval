@@ -1,10 +1,5 @@
-"""Aggregation conventions, implemented once.
-
-The experiment's standard rollup is: MEAN across queries (per-query recall@K
-is too coarse for a median — mostly 0, else 1/|gold|, so a query-median
-collapses to 0/1), then MEDIAN across subsets, then (noise-null only)
-mean + band across seeds.
-"""
+"""Aggregation conventions: MEAN across queries (per-query recall is too
+coarse for a median), then MEDIAN across subsets."""
 from __future__ import annotations
 
 import statistics
@@ -12,7 +7,7 @@ from typing import Iterable
 
 
 def qmean(xs: list[float]) -> float:
-    """Mean across queries. See module docstring for why not median."""
+    """Mean across queries."""
     return statistics.fmean(xs) if xs else 0.0
 
 

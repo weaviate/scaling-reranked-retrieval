@@ -1,18 +1,5 @@
-"""Loader/validator for listwise-LLM ranking caches.
-
-The listwise experiment (retrieval/listwise_rerank.py) caches every
-(query, trial) LLM response — including the full reordered ranking
-(`listwise_doc_ids`) — to an append-only JSONL keyed by
-(domain, model, effort, pool-slug, first_k, pool_k):
-
-    results/listwise/cache/<domain>__<model>__<effort>__<pool-slug>__first<K>__top<P>.jsonl
-
-Those JSONLs are the canonical ranking store (analogous to caches/k{N}.json
-for the cross-encoders). This module loads one into a validated
-ListwiseRankings — completeness (every pool query × every trial), permutation
-integrity (each ranking is exactly the pool's doc set), parse-failure flags —
-so the fusion analysis (analysis/listwise_fusion.py) never touches raw JSONL
-or filename conventions directly. Zero network.
+"""Loader/validator for listwise-LLM ranking caches (append-only JSONL under
+results/listwise/cache/, the canonical ranking store). Zero network.
 """
 from __future__ import annotations
 
@@ -24,10 +11,7 @@ from scaling_reranked_retrieval.config import RESULTS_DIR
 
 LISTWISE_DIR = RESULTS_DIR / "listwise"
 
-# Short condition-name labels for known listwise models, shared by every
-# listwise analysis (fusion / unique-success / oracle-routing) so condition
-# names and output filenames stay consistent across reports. Unknown models
-# fall back to a sanitized model id.
+# Short condition-name labels shared by every listwise analysis; unknown models fall back to a sanitized id.
 SHORT_LABEL = {
     "gpt-5.4-mini": "mini",
     "gpt-5.4": "full",
@@ -104,10 +88,9 @@ def load_listwise_rankings(
 ) -> ListwiseRankings:
     """Load + validate one (domain, model) ranking cache against its pool.
 
-    Raises with a precise message if the cache is missing, incomplete (any
-    (query, trial) not cached), or corrupt (a ranking that is not a
-    permutation of its query's pool). Duplicate (qid, trial) JSONL lines are
-    resolved last-wins, matching the experiment's own cache loader.
+    Raises if the cache is missing, incomplete, or not a permutation of the
+    pool. Duplicate (qid, trial) lines resolve last-wins, matching the
+    experiment's own cache loader.
     """
     pool = load_pool(domain, pool_source, first_k, pool_k)
     cache_path = ranking_cache_file(domain, model, effort, pool_source, first_k, pool_k)
@@ -129,7 +112,7 @@ def load_listwise_rankings(
         out.gold[qid] = list(q["gold"])
         out.pool_order[qid] = list(q["doc_ids"])
 
-    # Last-wins per (qid, trial), matching load_query_cache in the experiment.
+    # Last-wins per (qid, trial).
     by_key: dict[tuple[str, int], dict] = {}
     with open(cache_path) as f:
         for line in f:

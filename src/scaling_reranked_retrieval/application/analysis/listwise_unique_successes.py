@@ -1,43 +1,8 @@
 """Per-model unique successes among the listwise LLM rerankers.
 
-The CE-tier unique-success analysis (analysis/unique_successes.py), ported to
-the listwise tier over an arbitrary model set (default: the effort-`none`
-trio gpt-5.4-mini, gpt-5.6-luna, gpt-5.6-terra). A model has a UNIQUE SUCCESS
-on a query (at cutoff K) when it lands a gold doc in its top-K while EVERY
-other model in the set misses — the singleton cells of the Success@K Venn.
-This is the per-model heterogeneity a router feeds on: the queries each
-listwise model alone rescues. The pool-source CE baseline is NOT a member;
-the Venn is over the listwise models only. With two models this reduces
-exactly to the pairwise a-only / b-only / both / neither analysis.
-
-"Success at K" = recall@K > 0 (at least one gold in the top-K), matching the
-CE analysis. Cutoffs are @1 and @5 ONLY: all models permute the SAME fixed
-pool (the pool-source top-pool_k), so hits at @pool_k are identical by
-construction and no unique success is possible there.
-
-Trials: listwise LLM sampling is stochastic, so the Venn is computed per
-TRIAL-ALIGNED trial (trial t of every model — the fusion analysis' policy)
-and cells are reported as mean ± std across trials. Rescued-query lists keep
-only queries uniquely rescued in a MAJORITY of trials (stable rescues), with
-the per-query trial count retained (full per-trial lists in the JSON).
-
-Cells per cutoff: one `unique` count per model, `multi_hit` (>= 2 models
-hit), `all_miss` (no model hits). unique counts + multi_hit + all_miss = n.
-
-Inputs (all on disk; zero LLM / zero network):
-  - results/listwise/pools/<domain>__<pool-slug>__first<K>__top<P>.json
-  - results/listwise/cache/<domain>__<model>__<effort>__<pool-slug>__...jsonl
-    (loaded + validated via src.listwise.load_listwise_rankings)
-
-Outputs: results/listwise/unique_successes/<pool-slug>__first<K>__top<P>/
-    <labels joined by __>__<effort>.json          full per-subset results
-    <labels joined by __>__<effort>__UNIQUE.md    cross-subset report
-
-Usage:
-    uv run python scripts/listwise_unique_successes.py           # the trio
-    uv run python scripts/listwise_unique_successes.py \
-        --models gpt-5.6-luna gpt-5.6-terra                       # any subset
-    uv run python scripts/listwise_unique_successes.py --smoke   # biology only
+Unique success @K = one model lands a gold doc in its top-K while every other
+misses (Success@K = recall@K > 0). Trial-aligned Venn, mean ± std across
+trials; rescued-query lists keep only majority-of-trials (stable) rescues.
 """
 from __future__ import annotations
 
@@ -65,11 +30,6 @@ QUERY_TRUNC = 120
 DEFAULT_MODELS = ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-terra"]
 
 
-# --------------------------------------------------------------------------- #
-# Core                                                                         #
-# --------------------------------------------------------------------------- #
-
-
 def qid_to_query_text(domain: str, pool_source: str, first_k: int,
                       pool_k: int) -> dict[str, str]:
     """qid -> (truncated) query text, from the materialized pool file."""
@@ -80,9 +40,7 @@ def qid_to_query_text(domain: str, pool_source: str, first_k: int,
 def analyze_subset(model_sets: dict[str, ListwiseRankings], trials: int) -> dict:
     """Per-(cutoff, trial) Venn cells + per-query unique-rescue counts.
 
-    model_sets is keyed by short label. Returns per cutoff: per-trial cell
-    counts, mean/std per cell, and per model the qids it uniquely rescued
-    with the number of trials (out of `trials`) the rescue held in.
+    model_sets is keyed by short label.
     """
     labels = list(model_sets)
     sets_ = list(model_sets.values())
@@ -141,11 +99,6 @@ def analyze_subset(model_sets: dict[str, ListwiseRankings], trials: int) -> dict
         out[str(K)] = stats
     return {"n": len(qids), "labels": labels, "cutoffs": out,
             "majority_trials": majority}
-
-
-# --------------------------------------------------------------------------- #
-# Report                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def render_report(payload: dict, list_cutoff: int) -> str:
@@ -227,11 +180,6 @@ def render_report(payload: dict, list_cutoff: int) -> str:
             lines.append("- (none)")
         lines.append("")
     return "\n".join(lines) + "\n"
-
-
-# --------------------------------------------------------------------------- #
-# Main                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

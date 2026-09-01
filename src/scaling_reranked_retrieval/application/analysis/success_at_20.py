@@ -1,36 +1,6 @@
-"""Success@20 for selected conditions, derived from the k=2000 score caches.
-
-Success@20 (hit rate) = fraction of queries with AT LEAST ONE gold doc in the
-top-20 of a condition's reranked output. This differs from the published
-Recall@20, which (for multi-gold BRIGHT queries) is |gold ∩ top-20| / |gold|
-per query — a mean recall of 0.65 does NOT tell you what fraction of queries
-got at least one gold into the pool. qab computes both; success was simply
-never in the `extra_metrics` list for these runs, and the runs/*.json files
-only persist aggregates, so it must be re-derived from the caches.
-
-Pure derivation — ZERO reranker API calls. Reuses:
-  - DerivedSearchAgent (byte-identical to the derive path behind runs/*.json)
-  - qab's calculate_success_at_k / calculate_recall_at_k (exact-match metrics)
-  - the same coverage denominator as run_search_eval: queries scored by EVERY
-    provider the condition uses (a dropped query has no `{p}_scores` key in
-    the cache, so the derive path errors and qab skips it — singletons cover
-    their own present set, fusion conditions the participating intersection).
-
-Reproducibility: RSF conditions break exact fused-score ties in `set(pool)`
-iteration order, which is `PYTHONHASHSEED`-dependent (~1 query of wobble; see
-CLAUDE.md). This script re-execs with PYTHONHASHSEED=0 so its own outputs are
-bit-reproducible; against the published runs (written under random seeds) the
-regression guard therefore tolerates ~1 query on rsf_* conditions and demands
-exact equality everywhere else.
-
-Outputs:
-  results/success_at_20.json
-  results/success_at_20_table.md
-
-Usage:
-    uv run python scripts/success_at_20.py
-    uv run python scripts/success_at_20.py --conditions zerank_only
-    uv run python scripts/success_at_20.py --datasets biology
+"""Success@20 (>=1 gold in the top-20) for selected conditions, derived from
+the k=2000 score caches via DerivedSearchAgent; zero reranker API calls.
+Re-execs with PYTHONHASHSEED=0 for bit-reproducible RSF tie-breaking.
 """
 from __future__ import annotations
 
@@ -40,8 +10,7 @@ import os
 import statistics
 import sys
 
-# RSF tie-breaking is hash-seed-dependent (set iteration); pin for
-# bit-reproducible output. Must happen before heavy imports.
+# RSF tie-breaking is hash-seed-dependent; pin before heavy imports.
 if os.environ.get("PYTHONHASHSEED") != "0":
     env = dict(os.environ, PYTHONHASHSEED="0")
     os.execve(sys.executable, [sys.executable, *sys.argv], env)
@@ -76,7 +45,6 @@ CUTOFF = 20
 CONDITION_BY_NAME = {c.name: c for c in CONDITIONS}
 DEFAULT_CONDITIONS = ("zerank_only", "rsf_equal_3way")
 
-# BRIGHT subsets with a k=2000 cache on disk (irpapers_text pending).
 DEFAULT_DATASETS = ("biology", "earth_science", "economics", "psychology", "robotics")
 
 
@@ -93,10 +61,8 @@ def published_recall_at_20(slug: str, k: int, cond_name: str):
     """Read a condition's avg_recall_at_20_mean from the on-disk run summaries.
 
     Returns (value, source_filename). Prefers runs/k{k}_from_k2000.json, then
-    any runs/k{k}_from_k*.json (biology's published small-k sweeps derive from
-    the older k500 cache — those can differ from a k2000-cache derivation by a
-    slightly different hybrid pool snapshot), then runs_rk100/ (psychology and
-    robotics were run directly at reranked_k=100; R@20 is byte-identical).
+    any runs/k{k}_from_k*.json (biology's legacy-k500 derivations can differ
+    slightly), then runs_rk100/ (R@20 byte-identical there).
     """
     results_dir = get_results_dir(slug)
     candidates = [results_dir / "runs" / f"k{k}_from_k{CACHE_K}.json"]
@@ -132,8 +98,7 @@ def analyze_dataset(slug: str, cond_names: list[str]) -> dict:
     for cond_name in cond_names:
         cond = CONDITION_BY_NAME[cond_name]
         needed = providers_needed(cond)
-        # Coverage: every needed provider scored the query (mirrors qab's
-        # skip-empty-result rule — dropped queries have no {p}_scores key).
+        # Coverage: every needed provider scored the query (mirrors qab's skip rule).
         covered = [
             text
             for text, entry in cache.queries.items()
@@ -157,8 +122,8 @@ def analyze_dataset(slug: str, cond_names: list[str]) -> dict:
             recall_at_20 = sum(recalls) / n
             published, source = published_recall_at_20(slug, k, cond_name)
             same_cache = bool(source) and f"from_k{CACHE_K}" in (source or "")
-            # rsf_* published values carry ~1 query of PYTHONHASHSEED
-            # tie-break wobble (CLAUDE.md); everything else must match exactly.
+            # rsf_* published values carry ~1 query of hash-seed tie-break
+            # wobble; everything else must match exactly.
             tol = (2.0 / n) if cond_name.startswith("rsf") else 1e-9
             delta = None if published is None else recall_at_20 - published
             match = delta is not None and abs(delta) <= tol

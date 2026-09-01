@@ -1,68 +1,8 @@
 """Per-singleton deep-recall grid: R@{1,5,20,50,100} × full retrieved_k sweep.
 
-Closes the gap noted in CLAUDE.md: R@1 and R@20 for each standalone reranker
-(`cohere`, `voyage`, `zerank`) are tabulated across the k sweep, but R@50 and
-R@100 per singleton appear only as sparse winner cells — never as a full grid.
-This produces the complete deep-recall scaling curve for each singleton so it
-can be plotted alongside the existing R@1/R@20 lines on one shared axis.
-
-READ-ONLY, ZERO-API. Every cell is derived from the k=2000 score caches via
-`DerivedSearchAgent` — the same path agreement_analysis / oracle_config_k200 /
-unique_successes_k200 use. A startup guard wraps the reranker client factories
-in the retrieval adapters so that constructing ANY reranker client raises (acceptance
-criterion: no reranker client is ever constructed). Singletons sort cached
-scores directly — the singleton path in DerivedSearchAgent bypasses fusion
-entirely, so there is no RSF pool-restricted normalization and no
-`PYTHONHASHSEED` tie-break exposure here (distinct-float sort is deterministic).
-
-DENOMINATOR (the key methodology choice). Recall is computed over the
-ALL-THREE-PRESENT intersection (queries scored by cohere AND voyage AND zerank
-at k=2000), identical to agreement_analysis.build_query_set. This is what keeps
-the new R@5/R@50/R@100 lines on the SAME footing as the R@1/R@20 lines already
-plotted in Section 5.1 — one denominator, one axis, no seam.
-
-  WHY NOT read R@50/R@100 straight from runs_rk100/: those files average each
-  singleton over its OWN coverage denominator (the queries that provider could
-  score), not the intersection. Reading them would put R@50/R@100 on a
-  different denominator than the intersection-based R@1/R@20 — exactly the seam
-  this extraction exists to avoid. So every singleton cell is RE-DERIVED over
-  the intersection from caches/k2000.json (provenance: "derived_from_cache"),
-  and the runs_rk100/ own-coverage values are reported only as a soft
-  cross-check (typically within ~1 query of the intersection numbers).
-
-REGRESSION GUARD (the spec lists two value sets; they live on two different
-denominators — see CLAUDE.md "Best-singleton sourcing" / equal_weight
-"Provenance / don't conflate"):
-  - HARD (±0.002): the all-5 intersection best-singleton line reproduces Section 5.1
-    EXACTLY — R@1 0.353/0.414/0.354/0.374/0.364, R@20 0.395/0.468/0.565/0.590/
-    0.599. These are produced by the same intersection + DerivedSearchAgent
-    path this script uses, so they must match to float noise. Failure here
-    means the derive path is wrong → nonzero exit.
-  - SOFT (~1 query): the published all-5 per-reranker and best-singleton
-    lines (cohere 0.301/0.301/0.330/0.263/0.212, best-singleton 0.340/0.414/
-    0.366/0.386/0.376, etc.) come from equal_weight_compare reading runs*/ over
-    each condition's OWN coverage. The intersection cannot reproduce them to
-    ±0.002 (they differ by the ~1-query intersection-vs-coverage gap CLAUDE.md
-    documents); we print the deltas and warn only if a delta exceeds ~1 query.
-
-Aggregation: MEAN across queries per subset (per-query recall@K is too coarse
-for a median — mostly 0, else 1/|gold|), MEDIAN across all five subsets for the
-cross-subset line. best_singleton per (k, cutoff)
-is the per-subset MAX over the three rerankers, THEN median across subsets
-(max-then-median — the Section 5.1 definition; this is what reproduces the guard
-line, not max-of-medians).
-
-Outputs (under results/):
-  singleton_deep_recall.json        — full grid + cross-subset medians +
-                                       best_singleton + provenance + guards
-  singleton_deep_recall_table.md    — cutoff×k matrices per reranker (all-5
-                                       cross-subset median) + best_singleton
-
-Usage:
-    uv run python scripts/singleton_deep_recall.py
-    uv run python scripts/singleton_deep_recall.py --k 2000
-    uv run python scripts/singleton_deep_recall.py --subsets biology economics
-    uv run python scripts/singleton_deep_recall.py --smoke
+Read-only, zero-API derivation over the k=2000 caches. Every cell is computed
+over the all-three-present intersection (never read from runs_rk100/, which is
+own-coverage) so all cutoff lines share one denominator and axis.
 """
 from __future__ import annotations
 
@@ -71,14 +11,7 @@ import json
 import statistics
 from typing import Optional
 
-# --------------------------------------------------------------------------- #
-# Zero-API guard: poison the reranker client factories so any attempt to       #
-# construct a reranker client fails loudly. This is read-only by construction  #
-# (we only call DerivedSearchAgent), but the guard makes the acceptance        #
-# criterion enforceable rather than aspirational.                              #
-# --------------------------------------------------------------------------- #
-
-
+# Zero-API guard: constructing any reranker client raises.
 def _install_no_reranker_client_guard() -> None:
     import scaling_reranked_retrieval.adapters.retrieval.clients as _clients
 
@@ -122,48 +55,35 @@ from scaling_reranked_retrieval.adapters import qab  # noqa: E402
 
 qab.setup()
 
-# --------------------------------------------------------------------------- #
-# Configuration                                                                #
-# --------------------------------------------------------------------------- #
-
-# Reranker name == provider name for singletons (cohere/voyage/zerank).
 RERANKERS = list(PROVIDERS)
 
 K_VALUES = (100, 200, 500, 1000, 2000)
-# Output cap 100 so R@50/R@100 are measurable. R@1/R@5/R@20 are byte-identical
-# to a cap-20 run (top-20 of a reranked top-100 == top-20 reranked directly,
-# cross-encoder scoring being per-(query,doc) independent), so this single cap
-# yields all five cutoffs on one path.
+# Output cap 100 so R@50/R@100 are measurable; R@1/R@5/R@20 are byte-identical
+# to a cap-20 run, so this single cap yields all five cutoffs.
 RERANKED_K = 100
 
-# The five cutoffs, in order, as runs-file metric keys.
 CUTOFFS = ("recall_at_1", "recall_at_5", "recall_at_20", "recall_at_50", "recall_at_100")
 
 SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
 
-# Published all-three-present intersection sizes (CLAUDE.md / Section 5.1). Confirmed
-# at runtime; a mismatch is surfaced (not necessarily fatal — a subset may be
-# absent or a cache may have changed).
+# Published all-three-present intersection sizes; confirmed at runtime
+# (mismatch warns, not necessarily fatal).
 PUBLISHED_INTERSECTION_N = {
     "biology": 102, "earth_science": 114, "economics": 103,
     "psychology": 99, "robotics": 92,
 }
 
-# --- Regression-guard target lines (across k = 100/200/500/1000/2000) ------- #
-
-# HARD guard (±0.002): all-5 intersection best-singleton — the Section 5.1 line. This
-# is produced by THIS script's exact path (intersection + DerivedSearchAgent +
-# per-subset-max-then-median), so it must reproduce to float noise.
+# HARD guard (±0.002): all-5 intersection best-singleton line, produced by this
+# exact path (intersection + DerivedSearchAgent + max-then-median) — must
+# reproduce to float noise.
 GUARD_HARD_ALL5_BEST_SINGLETON = {
     "recall_at_1": [0.353, 0.414, 0.354, 0.374, 0.364],
     "recall_at_20": [0.395, 0.468, 0.565, 0.590, 0.599],
 }
 GUARD_HARD_TOL = 0.002
 
-# SOFT cross-check (~1 query): published ALL-5 per-reranker + best-singleton
-# lines. These are equal_weight_compare's OWN-COVERAGE numbers, on a
-# different denominator than the intersection — so we expect agreement only to
-# ~1 query and warn solely on larger drift.
+# SOFT cross-check (~1 query): published own-coverage equal_weight lines —
+# different denominator than the intersection, so agreement only to ~1 query.
 GUARD_SOFT_ALL5_PER_RERANKER = {
     "recall_at_1": {
         "cohere": [0.301, 0.301, 0.330, 0.263, 0.212],
@@ -180,8 +100,7 @@ GUARD_SOFT_ALL5_BEST_SINGLETON = {
     "recall_at_1": [0.340, 0.414, 0.366, 0.386, 0.376],
     "recall_at_20": [0.395, 0.468, 0.564, 0.588, 0.597],
 }
-# ~1 query at the smallest intersection (~92): allow ~1.5 queries of slack
-# before warning.
+# ~1.5 queries of slack at the smallest intersection (~92).
 GUARD_SOFT_TOL = 0.018
 
 METRIC_LABEL = {
@@ -190,18 +109,8 @@ METRIC_LABEL = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Per-subset derivation (intersection, DerivedSearchAgent)                      #
-# --------------------------------------------------------------------------- #
-
-
 def compute_subset(cache, qs, ks: list[int]) -> tuple[dict, int]:
-    """Per (reranker, k, cutoff) MEAN recall over the intersection queries.
-
-    Returns {reranker: {k: {cutoff: mean}}}. One DerivedSearchAgent run per
-    (query, reranker, k) at reranked_k=RERANKED_K; all five cutoffs read off the
-    same reranked list (qab's recall@k slices internally).
-    """
+    """Per (reranker, k, cutoff) MEAN recall over the intersection queries."""
     queries = list(qs.gold.keys())
     n = len(queries)
     out = {r: {k: {c: 0.0 for c in CUTOFFS} for k in ks} for r in RERANKERS}
@@ -223,29 +132,15 @@ def compute_subset(cache, qs, ks: list[int]) -> tuple[dict, int]:
 
 
 def _mechanical(k: int, cutoff: str) -> bool:
-    """k=100 R@100 is the mechanical identity.
-
-    At retrieved_k=k with reranked_k=100 >= k, the singleton emits the entire
-    k-doc pool (reordered), so recall@K for K>=k equals the hybrid R@K ceiling —
-    not a reranker achievement, just the pool's own recall. In this grid that is
-    exactly (k=100, recall@100). (recall@50 at k=100 still depends on the
-    reranked top-50, so it is NOT mechanical.)
-    """
+    """k=100 R@100 is mechanical: with reranked_k >= k the singleton emits the
+    whole pool, so recall@K for K >= k equals the hybrid ceiling."""
     cut_k = int(cutoff.partition("_at_")[2])
     return cut_k >= k and RERANKED_K >= k
 
 
-# --------------------------------------------------------------------------- #
-# runs_rk100 own-coverage cross-check (soft; NOT the source of any grid cell)   #
-# --------------------------------------------------------------------------- #
-
-
 def read_runs_rk100_singletons(dataset_slug: str, k: int) -> dict:
-    """Own-coverage R@{50,100} (and R@1/20) for the singletons from runs_rk100/.
-
-    Returns {reranker: {cutoff: value or None}}. Used ONLY to cross-check the
-    intersection-derived cells, never as their source (different denominator).
-    """
+    """Own-coverage singleton values from runs_rk100/ — used ONLY as a
+    cross-check, never as a cell source (different denominator)."""
     rd = get_results_dir(dataset_slug)
     path = rd / "runs_rk100" / f"k{k}_from_k{CACHE_K}.json"
     out = {r: {c: None for c in CUTOFFS} for r in RERANKERS}
@@ -260,11 +155,6 @@ def read_runs_rk100_singletons(dataset_slug: str, k: int) -> dict:
         for c in CUTOFFS:
             out[r][c] = entry.get(f"avg_{c}_mean")
     return out
-
-
-# --------------------------------------------------------------------------- #
-# Cross-subset aggregation                                                      #
-# --------------------------------------------------------------------------- #
 
 
 def _median(xs: list[float]) -> float:
@@ -286,11 +176,8 @@ def cross_subset(per_subset: dict, subsets: list[str], ks: list[int]) -> dict:
 
 
 def best_singleton(per_subset: dict, subsets: list[str], ks: list[int]) -> dict:
-    """Per (k, cutoff): per-subset MAX over rerankers, THEN median across subsets.
-
-    This max-then-median order is the Section 5.1 best_singleton definition and is what
-    reproduces the regression-guard line (max-of-medians would differ).
-    """
+    """Per (k, cutoff): per-subset MAX over rerankers, THEN median across subsets
+    (max-then-median reproduces the guard line; max-of-medians would differ)."""
     return {
         str(k): {
             c: _median([
@@ -300,11 +187,6 @@ def best_singleton(per_subset: dict, subsets: list[str], ks: list[int]) -> dict:
         }
         for k in ks
     }
-
-
-# --------------------------------------------------------------------------- #
-# Regression guards                                                             #
-# --------------------------------------------------------------------------- #
 
 
 def run_guards(
@@ -321,7 +203,7 @@ def run_guards(
     def at(line_for_k: dict, c: str) -> list[float]:
         return [line_for_k[str(k)][c] for k in K_VALUES]
 
-    # HARD: all-5 best-singleton == Section 5.1 line (exact path → float noise).
+    # HARD: intersection best-singleton line (exact path → float noise).
     for c, target in GUARD_HARD_ALL5_BEST_SINGLETON.items():
         got = at(best_all5, c)
         for k, g, t in zip(K_VALUES, got, target):
@@ -331,7 +213,7 @@ def run_guards(
                     f"got {g:.4f} vs Section 5.1 {t:.4f} (|Δ|={abs(g-t):.4f} > {GUARD_HARD_TOL})"
                 )
 
-    # SOFT: all-5 per-reranker vs published own-coverage equal_weight line.
+    # SOFT: vs published own-coverage equal_weight lines.
     for c, by_r in GUARD_SOFT_ALL5_PER_RERANKER.items():
         for r, target in by_r.items():
             got = at(cross_all5[r], c)
@@ -341,7 +223,6 @@ def run_guards(
                         f"[SOFT] all-5 {r} {METRIC_LABEL[c]} k={k}: intersection "
                         f"{g:.4f} vs published own-coverage {t:.4f} (Δ={g-t:+.4f})"
                     )
-    # SOFT: all-5 best-singleton vs published own-coverage line.
     for c, target in GUARD_SOFT_ALL5_BEST_SINGLETON.items():
         got = at(best_all5, c)
         for k, g, t in zip(K_VALUES, got, target):
@@ -351,11 +232,6 @@ def run_guards(
                     f"intersection {g:.4f} vs published own-coverage {t:.4f} (Δ={g-t:+.4f})"
                 )
     return hard, soft
-
-
-# --------------------------------------------------------------------------- #
-# Driver                                                                        #
-# --------------------------------------------------------------------------- #
 
 
 def run(
@@ -377,24 +253,20 @@ def run(
         sub, n = compute_subset(cache, qs, ks)
         per_subset[ds] = sub
         intersection_counts[ds] = n
-        # Confirm against the published intersection size.
         exp = PUBLISHED_INTERSECTION_N.get(ds)
         flag = "" if exp is None or exp == n else f"  [WARN expected {exp}]"
         print(f"  intersection n={n}{flag}")
-        # Provenance: every singleton cell is derived from the cache over the
-        # intersection (runs_rk100 is own-coverage; see module docstring).
         provenance[ds] = {
             r: {str(k): {c: "derived_from_cache" for c in CUTOFFS} for k in ks}
             for r in RERANKERS
         }
-        # Soft own-coverage cross-check from runs_rk100 (recorded, not sourced).
+        # Own-coverage cross-check from runs_rk100 (recorded, not sourced).
         crosscheck[ds] = {str(k): read_runs_rk100_singletons(ds, k) for k in ks}
 
     present = [ds for ds in subsets if ds in per_subset]
     if not present:
         raise SystemExit("No subsets had a usable k=2000 cache.")
 
-    # Per-subset block with mechanical flags.
     per_subset_out = {}
     for ds in present:
         per_subset_out[ds] = {"rerankers": {}}
@@ -471,11 +343,6 @@ def run(
     return payload
 
 
-# --------------------------------------------------------------------------- #
-# Markdown                                                                      #
-# --------------------------------------------------------------------------- #
-
-
 def _f(x: Optional[float]) -> str:
     return "n/a" if x is None else f"{x:.3f}"
 
@@ -542,7 +409,6 @@ def render_table(payload, present, ks) -> str:
 
     mech = _mechanical
 
-    # Primary: all-5 cross-subset median, per reranker.
     A("## Cross-subset median — ALL 5 (primary)")
     A("")
     A(f"Median across the {len(present)} subsets "
@@ -552,7 +418,6 @@ def render_table(payload, present, ks) -> str:
         _grid_block(A, r, payload["cross_subset_median"]["all5"][r], ks, mech)
     _grid_block(A, "best singleton", payload["best_singleton"]["all5"], ks, mech)
 
-    # Per-subset grids.
     A("## Per-subset grids")
     A("")
     for ds in present:
@@ -568,7 +433,6 @@ def render_table(payload, present, ks) -> str:
             }
             _grid_block(A, r, block, ks, mech)
 
-    # Regression guard summary.
     rg = payload["regression_guard"]
     A("## Regression guard")
     A("")
@@ -592,11 +456,6 @@ def render_table(payload, present, ks) -> str:
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------- #
-# CLI                                                                          #
-# --------------------------------------------------------------------------- #
-
-
 def run_smoke() -> None:
     """biology only, full k sweep, print to stdout, no write. Asserts basics."""
     print("=== SMOKE: biology, full k sweep ===")
@@ -604,9 +463,8 @@ def run_smoke() -> None:
     n = payload["intersection_counts"]["biology"]
     assert n == PUBLISHED_INTERSECTION_N["biology"], f"biology n={n} != 102"
     bio = payload["per_subset"]["biology"]["rerankers"]
-    # Monotonicity holds only among the proper-recall cutoffs (R@5 <= R@20 <=
-    # R@50 <= R@100). qab's recall@1 is Success@1 (found_count, NOT divided by
-    # |gold|), so R@1 can exceed R@5 — that is by design, not a bug.
+    # Monotone only among proper-recall cutoffs: qab's recall@1 is Success@1,
+    # so R@1 can exceed R@5 by design.
     recall_cutoffs = ["recall_at_5", "recall_at_20", "recall_at_50", "recall_at_100"]
     for r in RERANKERS:
         for k in K_VALUES:
@@ -614,7 +472,6 @@ def run_smoke() -> None:
             assert all(a <= b + 1e-9 for a, b in zip(vals, vals[1:])), (
                 f"non-monotone recall cutoffs for {r} k={k}: {vals}"
             )
-    # Mechanical flag present exactly at k=100 R@100.
     assert bio["cohere"]["100"]["recall_at_100"].get("mechanical") is True
     assert "mechanical" not in bio["cohere"]["2000"]["recall_at_100"]
     print("\nSMOKE PASSED. biology single-subset medians:")

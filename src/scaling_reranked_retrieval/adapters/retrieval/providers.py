@@ -1,19 +1,9 @@
 """Per-provider reranker adapters (Cohere / Voyage / ZeroEntropy).
 
-Each make_*_reranker factory wraps a provider SDK client into a uniform
-callable `(query, documents, top_k) -> List[RerankItem]` that accepts an
-arbitrary number of documents; batches beyond the provider's per-call limits
-are split transparently by the machinery in retrieval.chunking:
-
-  - Cohere: count-capped only (1000 docs/call).
-  - Voyage: count-capped + a 600K-tokens-per-batch budget that isn't
-    expressible as a doc count. Handled reactively: the SDK's 400
-    "max allowed tokens per submitted batch" error triggers recursive chunk
-    halving (needed for long-doc datasets, e.g. bright/economics).
-  - ZeroEntropy (zerank): count-capped + a 5MB UTF-8 request-byte cap.
-    Handled proactively (byte-budget packing under ZERANK_BYTE_BUDGET, leaving
-    headroom for query + JSON escaping) with the same reactive halving as a
-    safety net (needed for long-doc datasets, e.g. bright/robotics).
+Provider API limits handled via retrieval.chunking: all are capped at 1000
+docs/call; Voyage adds a 600K-tokens-per-batch budget (reactive halving);
+ZeroEntropy adds a 5MB UTF-8 request cap (proactive byte-budget packing plus
+reactive halving).
 """
 from __future__ import annotations
 
@@ -36,17 +26,8 @@ FusionMethod = Literal["rrf", "rsf"]
 RERANKER_PROVIDERS: tuple[str, ...] = ("cohere", "voyage", "zerank")
 
 
-# --------------------------------------------------------------------------- #
-# Overflow-error detection                                                     #
-# --------------------------------------------------------------------------- #
-
-# Substring lookup used to detect Voyage's per-batch token-budget overflow.
-# Voyage's SDK raises voyageai.error.InvalidRequestError; we match on the
-# message rather than the exception type to avoid a hard dependency on the
-# SDK's exception hierarchy. The message looks like:
-#   "Request to model 'rerank-2.5' failed. The max allowed tokens per
-#    submitted batch is 600000. Your batch has 607519 tokens after
-#    truncation. Please lower the number of tokens in the batch."
+# Voyage token-budget overflow is detected by message substring (not exception
+# type) to avoid depending on the SDK's exception hierarchy.
 _VOYAGE_TOKEN_LIMIT_MARKER = "max allowed tokens per submitted batch"
 
 
@@ -54,12 +35,8 @@ def _is_voyage_token_limit_error(exc: BaseException) -> bool:
     return _VOYAGE_TOKEN_LIMIT_MARKER in str(exc).lower()
 
 
-# ZeroEntropy (zerank) enforces a hard cap on the total UTF-8 byte size of the
-# request payload (query + documents + JSON envelope). The default Organization
-# limit is 5,000,000 bytes; exceeding it returns a 400 BadRequestError whose
-# message contains "UTF-8 bytes in this request". ZERANK_BYTE_BUDGET is a
-# conservative fraction of the hard limit, leaving headroom for the query +
-# JSON escaping.
+# ZeroEntropy hard-caps request payloads at 5,000,000 UTF-8 bytes; the budget
+# leaves headroom for the query + JSON escaping.
 ZERANK_BYTE_BUDGET = 4_500_000
 _ZERANK_BYTE_LIMIT_MARKER = "utf-8 bytes in this request"
 
@@ -68,17 +45,8 @@ def _is_zerank_byte_limit_error(exc: BaseException) -> bool:
     return _ZERANK_BYTE_LIMIT_MARKER in str(exc).lower()
 
 
-# --------------------------------------------------------------------------- #
-# Voyage TPM pacing                                                            #
-# --------------------------------------------------------------------------- #
-
-# Post-call sleep (seconds) for Voyage rerank, paced to stay under the 4M
-# tokens-per-minute cap at large retrieved_k. With 1000 docs × ~500 tokens
-# per chunk and two chunks per query at retrieved_k=2000, each query sends
-# ~1M Voyage tokens in a burst — so a 30 s sleep after the rerank completes
-# caps the rate at ~1.8M TPM, well under the 4M cap. Set via
-# configure_voyage_post_call_sleep(). Sleep applies only on success; a
-# 429-or-other failure raises before the sleep runs.
+# Post-call sleep (seconds) pacing Voyage rerank under its 4M tokens-per-minute
+# cap; applies only on success (failures raise before the sleep).
 _voyage_post_call_sleep_seconds: float = 0.0
 
 
@@ -86,11 +54,6 @@ def configure_voyage_post_call_sleep(seconds: float) -> None:
     """Set the post-call sleep duration for Voyage rerank operations."""
     global _voyage_post_call_sleep_seconds
     _voyage_post_call_sleep_seconds = max(0.0, float(seconds))
-
-
-# --------------------------------------------------------------------------- #
-# Cohere                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def make_cohere_reranker(client: Any, model: str = "rerank-v3.5") -> Callable:
@@ -111,11 +74,6 @@ def make_async_cohere_reranker(client: Any, model: str = "rerank-v3.5") -> Calla
     async def _fn(query: str, documents: List[str], top_k: int) -> List[RerankItem]:
         return await async_chunked_rerank(call_chunk, query, documents, top_k, MAX_DOCS_PER_CALL["cohere"])
     return _fn
-
-
-# --------------------------------------------------------------------------- #
-# Voyage                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def make_voyage_reranker(client: Any, model: str = "rerank-2.5") -> Callable:
@@ -141,17 +99,11 @@ def make_async_voyage_reranker(client: Any, model: str = "rerank-2.5") -> Callab
         items = await async_chunked_rerank(
             safe_call_chunk, query, documents, top_k, MAX_DOCS_PER_CALL["voyage"]
         )
-        # Pace successive Voyage calls to stay under the 4M-TPM cap. Runs
-        # only on success; failures raise before this sleep.
+        # TPM pacing; runs only on success.
         if _voyage_post_call_sleep_seconds > 0:
             await asyncio.sleep(_voyage_post_call_sleep_seconds)
         return items
     return _fn
-
-
-# --------------------------------------------------------------------------- #
-# ZeroEntropy (zerank)                                                         #
-# --------------------------------------------------------------------------- #
 
 
 def make_zerank_reranker(client: Any, model: str = "zerank-2") -> Callable:

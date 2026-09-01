@@ -1,82 +1,7 @@
 """Listwise LLM reranking over a cross-encoder candidate pool (CE → listwise).
 
-Pipeline per query (see mixture-of-rerankers/CLAUDE.md for the MoCE experiment):
-  1. Hybrid search returns the top FIRST_STAGE_K=2000 candidates (from the cache).
-  2. A pool-source condition ranks all 2000 and its top POOL_K become the
-     candidate pool. Default: `zerank_only` top-20 (the Zerank-2 singleton
-     order). `--pool-source voyage_only` reproduces the earlier Voyage-pool
-     runs; `--pool-source rsf_equal_3way --pool-k 100` the original MoCE pool.
-  3. A single-pass listwise LLM reranks that pool, N_TRIALS=3 independent times
-     (LLM sampling is stochastic; trials give a mean ± std variance estimate).
-
-Execution is two-phase: phase 1 runs every uncached (query, trial) LLM call
-CONCURRENTLY (AsyncOpenAI + asyncio.Semaphore; --concurrency, default 8, 1 =
-serial), appending each result to the per-query JSONL cache as it lands — so a
-crash/interrupt resumes and only missing calls are re-paid. Phase 2 is the
-unchanged serial aggregation loop reading everything from the (now-complete)
-cache: ordered per-query progress, rescue ledger, and cost accounting need no
-concurrency-awareness. Per-call latency_s stays per-call (it can read slightly
-higher under rate-limit queueing); the fill phase's wall-clock is recorded
-separately in listwise.json["latency"]["fill_wall_clock_s"].
-
-The pool-source top-POOL_K is the fixed pool, and its order is the pointwise
-baseline (`pool_baseline`) the listwise reranker must beat on the head metrics
-(R@1/R@5; R@POOL_K is the pool ceiling, invariant under reordering). Question:
-does listwise reasoning lift the head over the pointwise CE ranking?
-
-ZERO new cross-encoder API calls: the three CE scores come from the k2000 cache;
-the RSF fusion is recomputed locally. Only the listwise LLM is called.
-
-Candidate-pool materialization (results/listwise/pools/):
-  For each BRIGHT subset, the pool-source top-POOL_K-of-2000 pool (ids + texts +
-  gold) is built ONCE from caches/k2000.json + corpus and saved to
-    results/listwise/pools/<domain>__<pool-slug>__first<K>__top<P>.json
-  (self-contained). Runs load that small file and skip BOTH the 50 MB cache and
-  the corpus. Build all five with --build-all-pools; --rebuild-pool forces it.
-
-  Determinism: singleton pools (e.g. voyage_only) sort distinct floats — exactly
-  DerivedSearchAgent's singleton path, bit-reproducible. RSF pools: Derived-
-  SearchAgent's RSF path tie-breaks via set() iteration (PYTHONHASHSEED-
-  dependent; CLAUDE.md); here the fusion is reimplemented with identical math
-  but iterating the hybrid-ordered pool, so ties break by hybrid rank → the
-  saved pool is reproducible. A build-time guard checks the top-POOL_K set
-  against DerivedSearchAgent (tolerating the documented ~1-doc tie wobble;
-  singleton pools must match exactly).
-
-Trials + outputs: each query is reranked --trials times (default 3); every
-(query, trial) LLM response is cached to JSONL, so re-runs and trial-count
-increases only pay for the missing trials. Per-domain outputs + the cross-
-subset summary land under
-  results/listwise/runs/<pool-slug>__first<K>__top<P>/<model>__<effort>/
-so different pool configs, models, and reasoning efforts never clobber each
-other — the run-dir identity matches the JSONL cache filename key exactly.
-The cached per-(query, trial) rankings are the input to the RRF fusion
-analysis in listwise_fusion.py (loaded via
-scaling_reranked_retrieval.application.listwise.load_listwise_rankings).
-
-LLM: one model per invocation via the OpenAI SDK directly (default
-`gpt-5.4-mini`; the experiment trio is EXPERIMENT_MODELS = gpt-5.4-mini +
-gpt-5.6-luna + gpt-5.6-terra, all at effort "none" — run each, then analyze
-with analysis/listwise_{fusion,unique_successes,oracle_routing}.py),
-Chat Completions with strict structured outputs (`response_format` = json_schema
-`{"ranking": [int]}`; position-encoded integers mapped back to doc_ids). Minimal
-schema keeps output tokens small; reasoning tokens bill at the output price, so
-reasoning effort is controlled and reasoning tokens are counted in the cost.
-
-A pre-flight cost estimate prints BEFORE any LLM call. --dry-run does everything
-except the LLM calls (so you can sanity-check the cost for $0).
-
-ENV: OPENAI_API_KEY (real run only). No reranker keys are used.
-
-CLI:
-  uv run python scripts/listwise_rerank.py --build-all-pools   # one-time
-  uv run python scripts/listwise_rerank.py --dry-run --n-queries 5
-  uv run python scripts/listwise_rerank.py            # full biology (all queries)
-  optional: --domain biology --model gpt-5.6-terra --first-stage-k 2000 --pool-k 20
-            --pool-source zerank_only --trials 3 --reasoning-effort medium
-            --price-in 2.50 --price-out 15.00 --reasoning-tokens-per-call N
-            --concurrency 8 --rebuild-pool --quiet
-"""
+Phase 1 concurrently fills a resumable per-(query, trial) JSONL cache of LLM
+calls; phase 2 aggregates serially from the cache. Zero new CE API calls."""
 from __future__ import annotations
 
 import argparse
@@ -107,28 +32,19 @@ from scaling_reranked_retrieval.application.queryset import load_and_validate
 
 from scaling_reranked_retrieval.adapters import qab
 
-# qab>=0.7 guard (replaces the old importlib.metadata version check) +
-# load_search_dataset memoization.
+# qab>=0.7 guard + load_search_dataset memoization.
 qab.setup()
-
-# --------------------------------------------------------------------------- #
-# Configuration                                                                #
-# --------------------------------------------------------------------------- #
 
 DOMAIN = "biology"
 BRIGHT_SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
 SEED = 42  # only used when --n-queries subsets the intersection
 
-# Two-stage knobs: hybrid retrieves FIRST_STAGE_K, the pool-source condition
-# reranks them and its top POOL_K becomes the listwise pool.
 DEFAULT_FIRST_STAGE_K = 2000
 DEFAULT_POOL_K = 20
-DEFAULT_POOL_SOURCE = "zerank_only"  # condition (singleton or RSF fusion) that builds the pool
-DEFAULT_TRIALS = 3  # independent LLM trials per query (variance estimate)
-DEFAULT_CONCURRENCY = 8  # parallel LLM calls in the phase-1 fill (1 = serial)
-POOL_SOURCE = DEFAULT_POOL_SOURCE  # module global; overridden from --pool-source in main()
-# Pool sources supported by the local deterministic reimplementation below
-# (singletons + RSF fusions; RRF would need its own derive path).
+DEFAULT_POOL_SOURCE = "zerank_only"
+DEFAULT_TRIALS = 3
+DEFAULT_CONCURRENCY = 8
+POOL_SOURCE = DEFAULT_POOL_SOURCE  # overridden from --pool-source in main()
 POOL_SOURCE_CHOICES = ("voyage_only", "cohere_only", "zerank_only", "rsf_equal_3way")
 POOL_LABEL = {
     "voyage_only": "Voyage rerank-2.5 singleton",
@@ -140,44 +56,25 @@ POOL_LABEL = {
 CUTOFFS = ("recall_at_1", "recall_at_5", "recall_at_20")
 METRIC_LABEL = {"recall_at_1": "R@1", "recall_at_5": "R@5", "recall_at_20": "R@20"}
 
-# The experiment's model trio (see the listwise_* analyses, which consume the
-# cached rankings). Runs are one model per invocation; run each. All three at
-# reasoning effort "none" so observed differences reflect the base model —
-# effort is a cache-key segment, so runs at other efforts land in separate
-# cache files and never mix.
 EXPERIMENT_MODELS = ("gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.6-terra")
-DEFAULT_MODEL = EXPERIMENT_MODELS[0]  # raw OpenAI SDK model id (no "openai/" prefix)
+DEFAULT_MODEL = EXPERIMENT_MODELS[0]
 
-# Known $/1M-token prices, used to resolve --price-in/--price-out when not
-# passed explicitly. Models absent from this table REQUIRE explicit price
-# flags — a silently-wrong cost estimate is worse than a hard stop.
+# $/1M-token prices; models absent here require explicit --price-in/--price-out.
 MODEL_PRICES = {
     "gpt-5.4-mini": (0.75, 4.50),
     "gpt-5.4": (2.50, 15.00),
     "gpt-5.6-luna": (1.00, 6.00),
     "gpt-5.6-terra": (2.50, 15.00),
 }
-# "none" = reasoning OFF (the experiment default): the model ranks in a single
-# non-reasoning pass, so completion tokens are just the ranking array.
-# Supported on the gpt-5.1+ family; pass --reasoning-effort to re-enable.
+# "none" = reasoning OFF; supported on the gpt-5.1+ family.
 DEFAULT_REASONING_EFFORT = "none"
-# Per-call hidden-reasoning-token ALLOWANCE for the pre-flight estimate, keyed by
-# effort. medium≈4000 is the MEASURED average from a gpt-5.4 single-pass smoke
-# (not yet re-measured on the gpt-5.6 pair — override --reasoning-tokens-per-call
-# if their reasoning budgets differ materially; only the ESTIMATE uses this)
-# over the 100-DOC MoCE pool (~3957/call; reasoning was ~94% of output tokens —
-# the real cost driver, and it scales with pool size). The estimate scales this
-# by pool_k/100 (floor 300), so a 20-doc pool assumes ~800/call at medium.
-# Override with --reasoning-tokens-per-call.
+# Estimate-only per-call reasoning-token allowances, measured at pool_k=100;
+# scaled by pool_k/100 with a floor. Override with --reasoning-tokens-per-call.
 REASONING_ALLOWANCE = {"none": 0, "minimal": 400, "low": 1500, "medium": 4000,
                        "high": 7000}
-REASONING_ALLOWANCE_POOL_K = 100  # pool size the allowances were measured at
+REASONING_ALLOWANCE_POOL_K = 100
 REASONING_ALLOWANCE_FLOOR = 300
 MAX_COMPLETION_TOKENS = 16000  # generous cap; only ACTUAL tokens bill
-
-# --------------------------------------------------------------------------- #
-# Prompt templates + structured-output schema (logged to prompts/)             #
-# --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT = (
     "You are RankGPT, an expert relevance ranker. You are given a query and a "
@@ -196,10 +93,7 @@ USER_TEMPLATE = (
     "to {n} must appear exactly once."
 )
 
-# Strict structured-output schema. Minimal on purpose: a single integer array,
-# no per-doc objects/reasons (those would multiply output tokens). Root must be
-# an object per OpenAI's structured-output rules, so the permutation lives under
-# `ranking`. Strict mode guarantees valid JSON of this shape; permutation
+# Root must be an object per OpenAI structured-output rules; permutation
 # validity (uniqueness/completeness) is enforced by the recovery layer below.
 RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -223,24 +117,17 @@ RESPONSE_FORMAT = {
 
 
 def build_user_prompt(query: str, doc_texts: list[str]) -> str:
-    """Assemble the user message for a list of passages (input order = list order).
-    Passage numbers are 1-based positions into the input list (RankGPT
-    convention); the caller maps the returned permutation back to doc_ids."""
+    """Passage numbers are 1-based input positions (RankGPT convention)."""
     passages = "\n".join(f"[{i}] {t}" for i, t in enumerate(doc_texts, 1))
     return USER_TEMPLATE.format(query=query, passages=passages, n=len(doc_texts))
 
-
-# --------------------------------------------------------------------------- #
-# Permutation parsing (structured-first, with recovery)                        #
-# --------------------------------------------------------------------------- #
 
 _ARRAY_RE = re.compile(r"\[.*\]", re.S)
 _INT_RE = re.compile(r"-?\d+")
 
 
 def extract_ints(text: str) -> list[int]:
-    """Pull the ranked integer list: structured `{"ranking": [...]}` first, then
-    any `[...]` array, then bare integers (recovery)."""
+    """Structured `{"ranking": [...]}` first, then any `[...]` array, then bare ints."""
     s = (text or "").strip()
     try:
         obj = json.loads(s)
@@ -262,9 +149,8 @@ def extract_ints(text: str) -> list[int]:
 
 
 def parse_permutation(text: str, n: int) -> tuple[list[int], bool]:
-    """Parse a response into a 1-based ordering over [1, n]. Dedups, drops
-    out-of-range, appends missing in input order (RankGPT recovery). parse_ok is
-    False only when no valid identifier could be extracted."""
+    """Dedup, drop out-of-range, append missing in input order (RankGPT
+    recovery); parse_ok is False only when no valid identifier was extracted."""
     nums = extract_ints(text)
     seen: set[int] = set()
     order: list[int] = []
@@ -277,11 +163,6 @@ def parse_permutation(text: str, n: int) -> tuple[list[int], bool]:
         if i not in seen:
             order.append(i)
     return order, parse_ok
-
-
-# --------------------------------------------------------------------------- #
-# Tokenization (pre-flight estimate; input exact, output deterministic + est.) #
-# --------------------------------------------------------------------------- #
 
 
 def get_encoder(model: str):
@@ -301,14 +182,8 @@ def visible_perm_tokens(enc, n: int) -> int:
     return len(enc.encode(str(list(range(1, n + 1)))))
 
 
-# --------------------------------------------------------------------------- #
-# Fusion / ranking from cached scores (deterministic; zero API)                #
-# --------------------------------------------------------------------------- #
-
-
 def _min_max(scores: dict) -> dict:
-    """Min-max normalize to [0,1]; matches derived.ScoreCache RSF (max→1.0 on a
-    flat set)."""
+    """Min-max normalize to [0,1]; max→1.0 on a flat set (matches ScoreCache RSF)."""
     if not scores:
         return {}
     vals = list(scores.values())
@@ -325,14 +200,9 @@ def _pool_scores(entry: dict, provider: str, pool: list[str]) -> dict:
 
 def rsf_fused_ranking(entry: dict, rerankers, weights: dict, retrieved_k: int,
                       reranked_k: int) -> list[str]:
-    """Equal-weight (or weighted) RSF fusion ranking of the top-`retrieved_k`
-    hybrid pool, returning the top `reranked_k` doc_ids.
-
-    Identical math to DerivedSearchAgent's RSF branch (per-reranker min-max →
-    weighted sum), EXCEPT we build the fused dict iterating the hybrid-ordered
-    pool (not set(pool)), so the stable sort breaks fused-score ties by hybrid
-    rank → deterministic (no PYTHONHASHSEED dependence). This is the determinism
-    fix CLAUDE.md endorses for the RSF path."""
+    """RSF fusion of the hybrid pool. Same math as DerivedSearchAgent's RSF
+    branch, but iterates the hybrid-ordered pool (not set(pool)) so ties break
+    by hybrid rank — deterministic, no PYTHONHASHSEED dependence."""
     pool = entry["hybrid_order"][:retrieved_k]
     normed = {r: _min_max(_pool_scores(entry, r, pool)) for r in rerankers}
     fused: dict[str, float] = {}
@@ -344,8 +214,7 @@ def rsf_fused_ranking(entry: dict, rerankers, weights: dict, retrieved_k: int,
 
 def singleton_ranking(entry: dict, provider: str, retrieved_k: int,
                       reranked_k: int) -> list[str]:
-    """Top-`reranked_k` of the top-`retrieved_k` hybrid pool by a single CE's
-    score (deterministic: pool-ordered dict + stable sort)."""
+    """Top-`reranked_k` of the hybrid pool by one CE score (deterministic)."""
     pool = entry["hybrid_order"][:retrieved_k]
     scores = _pool_scores(entry, provider, pool)
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -361,8 +230,7 @@ def get_pool_condition():
 
 def pool_source_ranking(entry: dict, cond, retrieved_k: int,
                         reranked_k: int) -> list[str]:
-    """Rank the top-`retrieved_k` hybrid pool with the pool-source condition
-    (singleton CE score sort, or weighted RSF fusion), deterministically."""
+    """Rank the hybrid pool with the pool-source condition, deterministically."""
     if cond.provider in ("cohere", "voyage", "zerank"):
         return singleton_ranking(entry, cond.provider, retrieved_k, reranked_k)
     if cond.provider == "hybrid" and cond.fusion_method == "rsf":
@@ -373,11 +241,6 @@ def pool_source_ranking(entry: dict, cond, retrieved_k: int,
         f"Pool source {cond.name!r} unsupported: only singleton and RSF-fusion "
         "conditions have a local deterministic derive path here."
     )
-
-
-# --------------------------------------------------------------------------- #
-# Candidate-pool construction + materialization                                #
-# --------------------------------------------------------------------------- #
 
 
 def load_corpus_text_map(qab_name: str) -> dict[str, str]:
@@ -391,10 +254,8 @@ def pool_path(out_dir: Path, domain: str, first_k: int, pool_k: int) -> Path:
 
 
 def build_pool(domain: str, first_k: int, pool_k: int) -> dict:
-    """Build the per-query pool-source top-`pool_k`-of-`first_k` pool over the
-    all-three-present intersection (self-contained: ids + deduped texts + gold).
-    Records the pool source's R@1 AND the three singletons' R@1 on the pool, plus
-    a faithfulness guard vs DerivedSearchAgent. Zero CE API calls."""
+    """Build the self-contained per-query pool (ids + deduped texts + gold)
+    over the intersection; zero CE API calls."""
     loaded = load_and_validate(domain)
     if loaded is None:
         raise SystemExit(f"No usable k{CACHE_K} cache for {domain}; cannot build pool.")
@@ -417,7 +278,7 @@ def build_pool(domain: str, first_k: int, pool_k: int) -> dict:
         r1[POOL_SOURCE] += _metric("recall_at_1", gold, fused_ids)
         for p in PROVIDERS:
             r1[p] += _metric("recall_at_1", gold, singleton_ranking(entry, p, first_k, pool_k))
-        # Faithfulness guard: compare top-pool_k SET vs DerivedSearchAgent.
+        # Faithfulness guard: top-pool_k set must match DerivedSearchAgent.
         da = DerivedSearchAgent(cache=cache, retrieved_k=first_k, condition=cond,
                                 reranked_k=pool_k)
         da_set = {o.object_id for o in da.run(text)}
@@ -489,7 +350,7 @@ def load_or_build_pool(out_dir: Path, domain: str, first_k: int, pool_k: int,
 
 
 def build_all_pools(out_dir: Path, first_k: int, pool_k: int, rebuild: bool) -> None:
-    """Build + save the pool-source pools for all five BRIGHT subsets."""
+    """Build + save the pools for all five BRIGHT subsets."""
     rows = []
     for ds in BRIGHT_SUBSETS:
         print(f"\n=== {ds} ===")
@@ -512,11 +373,6 @@ def build_all_pools(out_dir: Path, first_k: int, pool_k: int, rebuild: bool) -> 
     print(f"\n  Pools saved under {out_dir / 'pools'}/. 'guard' = queries whose "
           "top-k set exactly matches DerivedSearchAgent; maxdiff = worst boundary "
           f"tie wobble (docs). lift = {POOL_SOURCE} R@1 − best singleton R@1.")
-
-
-# --------------------------------------------------------------------------- #
-# Recall + interpretability helpers                                            #
-# --------------------------------------------------------------------------- #
 
 
 def first_gold_rank(ranked: list[str], gold: set) -> "int | None":
@@ -545,29 +401,17 @@ def recall_row(ranked_by_query: dict[str, list[str]],
     return {c: (out[c] / n if n else 0.0) for c in CUTOFFS}
 
 
-# --------------------------------------------------------------------------- #
-# LLM call wrapper (OpenAI SDK directly; structured outputs)                    #
-# --------------------------------------------------------------------------- #
-
-
 class LLMConfig:
     def __init__(self, client, model: str, reasoning_effort: str,
                  max_completion_tokens: int):
-        self.client = client  # openai.AsyncOpenAI (all LLM calls go through the async fill phase)
+        self.client = client  # openai.AsyncOpenAI
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.max_completion_tokens = max_completion_tokens
 
 
-# --------------------------------------------------------------------------- #
-# Per-query response cache (incremental + resumable; never re-pay a query)      #
-# --------------------------------------------------------------------------- #
-# One JSONL file per (domain, model, effort, pool config). Each line is one
-# (query, trial) listwise result: {qid, trial, listwise_doc_ids, prompt/
-# completion/reasoning tokens, latency_s, parse_failed}. Lines are appended as
-# calls complete, so a crashed/partial run resumes, and a later run with more
-# trials reuses the existing ones (entries missing "trial" are trial 0 — the
-# pre-trials cache format). A cached entry is only honored if its doc set
+# One JSONL per (domain, model, effort, pool config), appended per (query,
+# trial) so partial runs resume; entries are honored only if their doc set
 # matches the current pool (guards against a rebuilt pool).
 
 
@@ -606,8 +450,7 @@ def append_query_cache(path: Path, entry: dict) -> None:
 
 def cache_hit(qcache: dict, qid: str, trial: int,
               pool_ids: list[str]) -> "dict | None":
-    """Return the cached entry for (qid, trial) iff its doc set matches the
-    current pool."""
+    """Cached entry for (qid, trial) iff its doc set matches the current pool."""
     e = qcache.get((str(qid), int(trial)))
     if e is not None and set(e["listwise_doc_ids"]) == set(pool_ids):
         return e
@@ -615,9 +458,8 @@ def cache_hit(qcache: dict, qid: str, trial: int,
 
 
 async def call_llm(cfg: LLMConfig, system: str, user: str) -> tuple[str, dict, float]:
-    """One Chat Completions call with strict structured outputs; returns
-    (text, normalized usage dict, latency_s). temperature is omitted (GPT-5
-    reasoning models accept only the default)."""
+    """One structured-outputs call → (text, usage, latency_s). temperature is
+    omitted: GPT-5 reasoning models accept only the default."""
     t0 = time.perf_counter()
     resp = await cfg.client.chat.completions.create(
         model=cfg.model,
@@ -656,10 +498,8 @@ def _usage_fields(u: dict) -> tuple[int, int, int]:
 async def rerank_single_pass(cfg: LLMConfig, query: str,
                              doc_ids: list[str],
                              id2text: dict[str, str]) -> dict:
-    """Single-pass listwise rerank of the whole pool with one LLM call (+ one
-    retry on a true parse failure; the retry stays sequential WITHIN this
-    task). Returns a per-query record: reordered doc_ids, parse_failed, token
-    counts (summed over calls), latency_s, and a status note."""
+    """Single-pass listwise rerank; one retry on a true parse failure, else
+    fall back to input order. Token counts are summed over calls."""
     texts = [id2text[d] for d in doc_ids]
     n = len(doc_ids)
     user = build_user_prompt(query, texts)
@@ -686,15 +526,10 @@ async def rerank_single_pass(cfg: LLMConfig, query: str,
 
 async def fill_query_cache(prep: dict, cfg: LLMConfig, args,
                            verbose: bool) -> set[tuple[str, int]]:
-    """Phase 1: run every uncached (query, trial) LLM call concurrently
-    (Semaphore-capped at --concurrency) and append each result to the JSONL
-    cache as it completes. Returns the set of (qid, trial) keys filled this
-    run (phase 2 counts exactly those as fresh spend).
-
-    Failure containment: one call's terminal error (after the SDK's own
-    retries) doesn't cancel the rest — completed entries are already on disk,
-    so a re-run only pays for the failures. If any call failed we exit after
-    the fill with a summary instead of aggregating incomplete results."""
+    """Phase 1: run uncached (query, trial) LLM calls concurrently, appending
+    each to the JSONL cache; returns the (qid, trial) keys filled this run.
+    A failed call doesn't cancel the rest (completed entries are on disk); any
+    failure exits after the fill instead of aggregating incomplete results."""
     qmap, id2text = prep["qmap"], prep["id2text"]
     jobs = [(s, tr) for s in prep["sampled"] for tr in range(args.trials)
             if cache_hit(prep["qcache"], s["qid"], tr,
@@ -753,16 +588,10 @@ async def fill_query_cache(prep: dict, cfg: LLMConfig, args,
     return {o for o in outcomes if not isinstance(o, BaseException)}
 
 
-# --------------------------------------------------------------------------- #
-# Pre-flight cost estimate (single-pass only)                                   #
-# --------------------------------------------------------------------------- #
-
-
 def estimate_costs(enc, sampled, qmap, id2text, price_in, price_out,
                    reasoning_per_call) -> dict:
-    """Tokenize each single-pass prompt; sum estimated cost. INPUT is exact (for
-    the encoder) + json_schema overhead; OUTPUT = permutation length + per-call
-    reasoning allowance (the cost driver, the main uncertainty)."""
+    """Input is exact (tiktoken) + json_schema overhead; output = permutation
+    length + per-call reasoning allowance (the main uncertainty)."""
     schema_tok = len(enc.encode(json.dumps(RESPONSE_FORMAT)))
     in_counts, out_counts = [], []
     for s in sampled:
@@ -806,11 +635,6 @@ def print_estimate(est: dict) -> None:
     print(f"  estimated: ${est['estimated_usd']:.3f}")
 
 
-# --------------------------------------------------------------------------- #
-# Outputs                                                                       #
-# --------------------------------------------------------------------------- #
-
-
 def write_prompts(listwise_dir: Path) -> None:
     pdir = listwise_dir / "prompts"
     pdir.mkdir(parents=True, exist_ok=True)
@@ -820,8 +644,7 @@ def write_prompts(listwise_dir: Path) -> None:
 
 
 def write_plot(payload: dict, out_dir: Path) -> Path:
-    """Grouped bar chart: pool baseline vs listwise trial-mean (± across-trial
-    std error bars), R@1/5/20."""
+    """Grouped bar chart: pool baseline vs listwise trial-mean, R@1/5/20."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -937,7 +760,6 @@ def render_table(payload: dict) -> str:
       + ", ".join(f"{k} {r1[k]:.3f}" for k in [POOL_SOURCE] + list(PROVIDERS))
       + f". The `{POOL_SOURCE}` pointwise order is the baseline listwise must beat.")
     A("")
-    # Go/no-go read (on the trial mean, with the across-trial std for scale).
     r1_lift = lift["recall@1"]
     r1_std = res["listwise_std"]["recall@1"]
     pf_rate = pf / n_calls if n_calls else 0.0
@@ -965,11 +787,6 @@ def render_table(payload: dict) -> str:
     return "\n".join(L)
 
 
-# --------------------------------------------------------------------------- #
-# Driver                                                                        #
-# --------------------------------------------------------------------------- #
-
-
 def _as_out(d: dict) -> dict:
     return {"recall@1": d["recall_at_1"], "recall@5": d["recall_at_5"],
             "recall@20": d["recall_at_20"]}
@@ -977,8 +794,8 @@ def _as_out(d: dict) -> dict:
 
 def prepare_domain(listwise_dir: Path, domain: str, args, enc,
                    reasoning_per_call: int, model_id: str) -> dict:
-    """Load (or build) the pool, sample, load the per-query cache, and pre-flight
-    estimate ONLY the uncached queries (so the estimate reflects what will pay)."""
+    """Load (or build) the pool, sample, load the per-query cache; the
+    pre-flight estimate covers only the uncached (query, trial) pairs."""
     pools, ppath = load_or_build_pool(listwise_dir, domain, args.first_stage_k,
                                       args.pool_k, args.rebuild_pool)
     meta = pools["metadata"]
@@ -986,9 +803,9 @@ def prepare_domain(listwise_dir: Path, domain: str, args, enc,
     id2text = pools["doc_texts"]
     gold_map = {t: set(v["gold"]) for t, v in qmap.items()}
     intersection = sorted(qmap.keys())
-    if args.n_queries is None:  # default: the full intersection, in sorted order
+    if args.n_queries is None:
         texts = list(intersection)
-    else:                       # subset: deterministic seed-42 sample
+    else:  # deterministic seed-42 sample
         n_req = min(args.n_queries, len(intersection))
         if n_req < args.n_queries:
             print(f"[warn] {domain}: requested {args.n_queries} but intersection "
@@ -1001,7 +818,6 @@ def prepare_domain(listwise_dir: Path, domain: str, args, enc,
                                    args.reasoning_effort, args.first_stage_k,
                                    args.pool_k)
     qcache = load_query_cache(qcache_path) if args.skip_existing else {}
-    # One LLM call per (query, trial); estimate only the uncached pairs.
     to_compute = [s for s in sampled for tr in range(args.trials)
                   if cache_hit(qcache, s["qid"], tr,
                                qmap[s["text"]]["doc_ids"]) is None]
@@ -1022,15 +838,10 @@ RESCUE_QUERY_TRUNC = 120
 def build_rescue_ledger(qid: str, text: str, gold: set, pool_ids: list[str],
                         trial_listwise_ids: list[list[str]],
                         head_cut: int) -> dict:
-    """Per-query rescue ledger: for each gold doc in the top-pool, its baseline
-    (pool-source) rank and its listwise rank in EVERY trial, plus per-query
-    roll-ups (mean over trials).
-
-    Each trial's ids are a permutation of pool_ids (single-pass reorders the
-    whole pool; recovery appends any dropped ids), so every gold-in-pool doc has
-    a rank in every trial. `rank` = the position of that specific gold doc
-    (1-based). `head_cut` = the golds@H roll-up cutoff (5 for small pools where
-    golds@pool_k would be invariant, else 20)."""
+    """Per-query rescue ledger: each gold-in-pool doc's baseline rank vs its
+    listwise rank per trial (1-based), plus mean-over-trials roll-ups. Each
+    trial's ids are a permutation of pool_ids, so every gold-in-pool doc has a
+    rank in every trial."""
     base_rank = {d: i for i, d in enumerate(pool_ids, 1)}
     trial_ranks = [{d: i for i, d in enumerate(ids, 1)} for ids in trial_listwise_ids]
     golds_in_pool = [d for d in pool_ids if d in gold]
@@ -1114,11 +925,8 @@ def render_rescues_table(payload: dict) -> str:
 
 def run_domain_listwise(prep: dict, args, run_dir: Path, verbose: bool,
                         fresh_keys: set[tuple[str, int]]) -> dict:
-    """Phase 2: aggregate one prepared domain from the (now-complete) per-query
-    cache — zero LLM calls here; every (query, trial) was filled by
-    fill_query_cache or a prior run. `fresh_keys` marks the entries paid for
-    this run (cost accounting). Writes per-domain outputs; returns a compact
-    summary for the cross-subset table."""
+    """Phase 2: aggregate one domain from the now-complete cache (zero LLM
+    calls). `fresh_keys` marks entries paid for this run (cost accounting)."""
     domain = prep["domain"]
     qmap, gold_map = prep["qmap"], prep["gold_map"]
     sampled, texts, intersection = prep["sampled"], prep["texts"], prep["intersection"]
@@ -1126,12 +934,12 @@ def run_domain_listwise(prep: dict, args, run_dir: Path, verbose: bool,
     qcache, qcache_path = prep["qcache"], prep["qcache_path"]
     r1pool = meta["pool_r1"]
     trials = args.trials
-    head_cut = 5 if args.pool_k <= 20 else 20  # golds@H roll-up for the ledger
+    head_cut = 5 if args.pool_k <= 20 else 20  # golds@pool_k would be invariant
 
     ranked_trials: list[dict[str, list[str]]] = [{} for _ in range(trials)]
     parse_fails_by_trial = [0] * trials
     rescues: list[dict] = []
-    # Fresh = computed this run (what you pay now); cum = all calls incl. cached.
+    # fresh = paid this run; cum = all calls incl. cached
     fresh_in = fresh_out = fresh_reason = fresh_calls = 0
     cum_in = cum_out = cum_reason = 0
     n_cached = 0
@@ -1203,15 +1011,14 @@ def run_domain_listwise(prep: dict, args, run_dir: Path, verbose: bool,
     ceiling_key = f"recall@{args.pool_k}"
 
     def _rceil(rbq):
-        # Pool ceiling R@pool_k. Invariant under listwise (it only reorders the
-        # pool), so baseline and every trial agree by construction; computed on
-        # each so a mismatch would flag a dropped-doc bug.
+        # Pool ceiling R@pool_k; invariant under listwise. Computed per row so
+        # a mismatch would flag a dropped-doc bug.
         return (sum(_metric(f"recall_at_{args.pool_k}", list(gold_map[t]), rbq[t])
                     for t in rbq) / len(rbq)) if rbq else 0.0
 
     def _with_ceiling(rbq):
         out = _as_out(recall_row(rbq, gold_map))
-        out[ceiling_key] = _rceil(rbq)  # == recall@20 when pool_k=20 (invariant)
+        out[ceiling_key] = _rceil(rbq)
         return out
 
     per_trial = [_with_ceiling(ranked_trials[tr]) for tr in range(trials)]
@@ -1248,7 +1055,7 @@ def run_domain_listwise(prep: dict, args, run_dir: Path, verbose: bool,
         "min_s": round(min(latencies), 3) if latencies else None,
         "max_s": round(max(latencies), 3) if latencies else None,
         "total_s": round(sum(latencies), 3) if latencies else None,
-        "fill_wall_clock_s": prep.get("fill_wall_s"),  # this run's concurrent fill (None if fully cached)
+        "fill_wall_clock_s": prep.get("fill_wall_s"),  # None if fully cached
         "concurrency": args.concurrency,
         "note": ("per-call single-pass listwise inference latency (s), pooled "
                  "over all trials; cached calls carry their originally-measured "
@@ -1283,8 +1090,8 @@ def run_domain_listwise(prep: dict, args, run_dir: Path, verbose: bool,
         "latency": latency_block,
         "cost": {
             "estimated_usd": est["estimated_usd"],
-            "actual_usd": actual_usd,            # this run (fresh calls only)
-            "cumulative_usd": cumulative_usd,    # all queries incl. cached
+            "actual_usd": actual_usd,            # fresh calls only
+            "cumulative_usd": cumulative_usd,    # incl. cached
             "input_tokens": fresh_in,
             "output_tokens": fresh_out,
             "reasoning_tokens": fresh_reason,
@@ -1361,7 +1168,6 @@ def write_cross_subset_summary(summaries: list[dict], run_dir: Path,
     }
     (run_dir / "summary.json").write_text(json.dumps(payload, indent=2))
 
-    # Markdown table. LW cells are trial-mean ± across-trial std.
     L = [f"# Listwise over the {POOL_SOURCE} pool — cross-subset summary", "",
          f"`{args.model}` (effort {args.reasoning_effort}), single-pass listwise "
          f"over the {POOL_SOURCE} top-{args.pool_k}-of-{args.first_stage_k} pool, "
@@ -1388,7 +1194,6 @@ def write_cross_subset_summary(summaries: list[dict], run_dir: Path,
           "mean across subsets (std cells: mean of per-subset stds).", ""]
     (run_dir / "summary_table.md").write_text("\n".join(L))
 
-    # Plot: per-subset pool vs listwise R@1 (mean ± std).
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1439,8 +1244,8 @@ def summary_from_payload(pl: dict) -> dict:
 
 def matching_existing(run_dir: Path, domain: str, prep: dict, args,
                       model_id: str) -> "dict | None":
-    """Return a saved listwise.json payload if --skip-existing and it matches the
-    current config (so the run can be reused instead of re-paid), else None."""
+    """Saved listwise.json payload if --skip-existing and the config matches
+    exactly (reused instead of re-paid), else None."""
     if not args.skip_existing:
         return None
     p = run_dir / domain / "listwise.json"
@@ -1536,9 +1341,8 @@ def main() -> None:
     model_id = (args.model.split("/", 1)[-1]
                 if args.model.startswith("openai/") else args.model)
 
-    # Resolve prices: explicit CLI > MODEL_PRICES registry > hard stop. Both
-    # the pre-flight estimate and the reported actual_usd use these, so an
-    # unpriced model must not fall back to another model's rates.
+    # Prices: explicit CLI > MODEL_PRICES > hard stop; an unpriced model must
+    # not fall back to another model's rates.
     if args.price_in is None or args.price_out is None:
         if model_id not in MODEL_PRICES:
             raise SystemExit(
@@ -1549,41 +1353,34 @@ def main() -> None:
         reg_in, reg_out = MODEL_PRICES[model_id]
         args.price_in = args.price_in if args.price_in is not None else reg_in
         args.price_out = args.price_out if args.price_out is not None else reg_out
-    # Per-config, per-model output dir so different pool sources / sizes /
-    # models / efforts never clobber each other. The run identity —
-    # (pool-slug, first_k, pool_k, model, effort) — matches the cache filename
-    # key exactly. (pools/ and cache/ stay shared under listwise_dir — their
-    # filenames already encode the config.)
+    # Run-dir identity (pool-slug, first_k, pool_k, model, effort) must match
+    # the cache filename key exactly.
     run_dir = (listwise_dir / "runs" /
                f"{POOL_SOURCE.replace('_', '-')}__first{args.first_stage_k}"
                f"__top{args.pool_k}" /
                f"{model_id}__{args.reasoning_effort}")
 
-    # --- One-time pool materialization for all 5 subsets -------------------- #
     if args.build_all_pools:
         build_all_pools(listwise_dir, args.first_stage_k, args.pool_k,
                         args.rebuild_pool)
         return
 
     domains = BRIGHT_SUBSETS if args.all_domains else [args.domain]
-    # The effort-keyed allowances were measured on a 100-doc pool; reasoning
-    # spend scales with pool size, so scale the estimate by pool_k/100.
+    # Allowances were measured on a 100-doc pool; scale by pool_k/100.
     base_allowance = REASONING_ALLOWANCE.get(args.reasoning_effort, 800)
     if args.reasoning_tokens_per_call is not None:
         reasoning_per_call = args.reasoning_tokens_per_call
     elif args.reasoning_effort == "none":
-        # Reasoning is off: no hidden tokens, no floor.
-        reasoning_per_call = 0
+        reasoning_per_call = 0  # reasoning off: no floor
     else:
         reasoning_per_call = max(REASONING_ALLOWANCE_FLOOR,
                                  round(base_allowance * args.pool_k
                                        / REASONING_ALLOWANCE_POOL_K))
     enc = get_encoder(args.model)
 
-    # --- Phase 1: load pools, sample, per-query cache, pre-flight estimate --- #
     preps = [prepare_domain(listwise_dir, d, args, enc, reasoning_per_call, model_id)
              for d in domains]
-    for p in preps:  # reuse a whole prior matching result instead of re-paying?
+    for p in preps:
         p["reuse"] = matching_existing(run_dir, p["domain"], p, args, model_id)
     print(f"\n=== PRE-FLIGHT (single-pass listwise · {POOL_SOURCE} top-"
           f"{args.pool_k} pool · {args.trials} trials/query) ===")
@@ -1611,13 +1408,11 @@ def main() -> None:
               "execute (requires OPENAI_API_KEY).")
         return
 
-    # Domains that still need fresh LLM calls (not fully reused / cached).
     needs_llm = [p for p in preps
                  if not p["reuse"] and p["n_cached"] < p["n_calls_total"]]
     if needs_llm and not os.getenv("OPENAI_API_KEY"):
         raise SystemExit("OPENAI_API_KEY is not set (required for the real run).")
 
-    # --- OpenAI client (raw async SDK; structured outputs) ------------------ #
     cfg = None
     if needs_llm:
         from openai import AsyncOpenAI
@@ -1634,12 +1429,10 @@ def main() -> None:
                   f"(${p['reuse']['cost']['actual_usd']:.3f}, no API calls).")
             summaries.append(summary_from_payload(p["reuse"]))
             continue
-        # Phase 1: concurrently fill the per-query cache (only missing calls).
         fresh_keys: set[tuple[str, int]] = set()
         if p["n_cached"] < p["n_calls_total"]:
             assert cfg is not None  # needs_llm guaranteed the client exists
             fresh_keys = asyncio.run(fill_query_cache(p, cfg, args, verbose))
-        # Phase 2: serial aggregation over the complete cache (no LLM calls).
         summaries.append(run_domain_listwise(p, args, run_dir, verbose,
                                              fresh_keys))
     if len(summaries) > 1:

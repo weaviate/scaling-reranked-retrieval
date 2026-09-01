@@ -1,9 +1,4 @@
-"""Query universe + drop accounting over a score cache.
-
-Builds the "all-three-present intersection" every cross-reranker analysis
-runs on, and the standard load-and-validate entry (cache + query set) for a
-dataset slug. Zero provider imports; qab is used only to load gold sets.
-"""
+"""Query universe + drop accounting over a score cache. Zero provider imports."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -23,14 +18,10 @@ from scaling_reranked_retrieval.config import (
 )
 
 
-# The 12 queries excluded from every experimental result in the paper:
-# 524 collected queries -> the 512-query universe (102/116/103/99/92).
-# Each was dropped because the named provider's rerank API persistently
-# failed on it during collection, leaving that query outside the
-# all-three-present intersection that build_query_set computes. Pinned here
-# (per-subset qab query_id, as reported in QuerySet.drops) so a fresh
-# re-collection can be checked against the paper's exact universe —
-# load_and_validate warns when a cache's drops differ from this table.
+# The 12 queries excluded from the paper's 512-query universe (524 collected):
+# each was dropped because the named provider's rerank API persistently failed
+# on it during collection. Ids are per-subset qab query_id, as reported in
+# QuerySet.drops; load_and_validate warns when a cache's drops differ.
 PAPER_EXPECTED_DROPS: dict[str, dict[str, set[str]]] = {
     "biology": {"voyage": {"29"}},
     "earth_science": {},
@@ -55,12 +46,10 @@ class QuerySet:
 
 
 def build_query_set(cache: ScoreCache, dataset_name: str) -> QuerySet:
-    """Map cache queries to gold sets and compute the analysis intersection.
+    """Map cache queries to gold sets and compute the all-three-present intersection.
 
-    The intersection is the set of queries scored by ALL THREE providers.
-    Provider presence is k-independent: if a provider scored a query at all
-    it scored the full retrieved_k=2000 pool, so a doc present at k=2000 is
-    present at every smaller k.
+    Provider presence is k-independent: a provider that scored a query scored
+    the full retrieved_k=2000 pool.
     """
     _, queries = in_memory_dataset_loader(dataset_name, queries_only=True)
     gold_by_text: dict[str, set[str]] = {}

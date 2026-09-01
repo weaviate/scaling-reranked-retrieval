@@ -1,8 +1,7 @@
 """DerivedSearchAgent: per-condition rankings entirely from a ScoreCache.
 
 Zero API calls and no provider imports; ranking semantics live in
-scaling_reranked_retrieval.domain.fusion (the single implementation). Each derived condition specifies its
-own `rerankers` subset so 2-way and 3-way conditions coexist over one cache.
+scaling_reranked_retrieval.domain.fusion (the single implementation).
 """
 from __future__ import annotations
 
@@ -14,15 +13,8 @@ from scaling_reranked_retrieval.domain.fusion import fused_ranking, rrf_fuse, rs
 
 
 class DerivedSearchAgent:
-    """SearchAgent that produces a condition's ranking from cached scores.
-
-    `condition` follows the same shape as src.conditions.Condition:
-        - provider:        None (hybrid_only) | "cohere" | "voyage" | "zerank" | "hybrid"
-        - fusion_method:   "rrf" | "rsf" (only used when provider == "hybrid")
-        - weights:         {provider_name: float} for fusion (weights sum to 1)
-        - rerankers:       tuple of provider names participating in fusion
-                           (only meaningful when provider == "hybrid")
-    """
+    """SearchAgent that produces a condition's ranking from cached scores;
+    `condition` follows the shape of domain.conditions.Condition."""
 
     RRF_K = RRF_K
     SCORE_KEY = {
@@ -64,11 +56,9 @@ class DerivedSearchAgent:
         hybrid_order: list[str] = data["hybrid_order"]
         pool = hybrid_order[: self.retrieved_k]
 
-        # hybrid_only: return retrieved_k docs in hybrid order
         if self.condition.provider is None:
             return pool
 
-        # Singleton conditions
         if self.condition.provider in self.SCORE_KEY:
             scores = self._scores_for(data, self.condition.provider, pool)
             return singleton_ranking(scores, self.reranked_k)
@@ -77,7 +67,6 @@ class DerivedSearchAgent:
         rerankers = getattr(self.condition, "rerankers", None) or ("cohere", "voyage")
         weights = self.condition.weights or {r: 1.0 / len(rerankers) for r in rerankers}
 
-        # Per-reranker scores filtered to the pool
         per_reranker = {r: self._scores_for(data, r, pool) for r in rerankers}
 
         if self.condition.fusion_method == "rsf":

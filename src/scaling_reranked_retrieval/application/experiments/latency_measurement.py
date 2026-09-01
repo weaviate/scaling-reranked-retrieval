@@ -1,45 +1,6 @@
-"""Latency + payload measurement harness (MoCE Section 3.3 / Section 3.4).
-
-Standalone, timing-only companion to run_experiment.py. Produces the two
-numbers the paper stubs:
-
-  Section 3.4 — rerank latency vs. K. Per-provider wall-clock latency to score a
-         candidate pool, swept over K ∈ {100,200,500,1000,2000}, so the
-         test-time-compute framing can state latency as a function of pool
-         depth and back the "added latency is bounded by the slowest model,
-         not the ensemble size" claim (parallel_bound vs serial_sum).
-
-  Section 3.3 — hybrid query latency + payload at k=2000. Single-query Weaviate
-         hybrid search wall-clock and two byte figures (the serialized wire
-         payload of the retrieval call, and the raw retrieved-content size the
-         rerankers ingest), at retrieved_k=2000.
-
-Both measurements run over the SAME randomly sampled queries per dataset, so
-the query set and sampling logic are written once.
-
-This script is TIMING ONLY: it never reads, writes, or invalidates any
-caches/k{N}.json score cache (a startup assertion enforces that the output
-path is not under caches/). Output lands under results/latency/ exclusively.
-
-Reuses (does not reimplement):
-  - DATASETS / DatasetConfig + get_results_dir from scaling_reranked_retrieval.config
-  - the all-three-present intersection (build_query_set) the agreement / oracle
-    scripts use, so every sampled query has a valid timing on all three
-    providers
-  - the reranker client constructors from clients.py and the per-provider
-    chunking constants from chunking.py/providers.py (NOT the reactive
-    byte/token halving — see _rerank_zerank / the failure handling below)
-  - the same query_agent_benchmarking>=0.7 guard (scaling_reranked_retrieval.adapters.qab)
-
-Usage:
-    uv run python scripts/latency_measurement.py --dataset robotics
-    uv run python scripts/latency_measurement.py --all-datasets
-    # flags: --n-queries 5 --seed 42 --k-sweep 100,200,500,1000,2000
-    #        --repeats 3 --smoke --network-location "us-east laptop"
-
-Env (all five required — this is a live-call script):
-    WEAVIATE_URL, WEAVIATE_API_KEY, COHERE_API_KEY, VOYAGE_API_KEY, ZERANK_API_KEY
-"""
+"""Latency + payload measurement harness: per-provider rerank latency vs pool
+depth K, and single-query hybrid latency + payload at k=2000, over the same
+sampled queries. Timing-only — never touches the score caches."""
 from __future__ import annotations
 
 import argparse
@@ -54,8 +15,6 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-# Reuse the dataset registry + results helpers (single source of truth) and the
-# exact intersection-building logic the agreement/oracle scripts use.
 from scaling_reranked_retrieval.adapters.cache import ScoreCache, validate_cache_for_use
 from scaling_reranked_retrieval.config import (
     CACHE_K,
@@ -79,12 +38,9 @@ from scaling_reranked_retrieval.adapters.retrieval.embeddings_registry import (
     get_embedding_headers,
 )
 
-# Per-provider per-call doc-count limit and zerank's byte budget, reused so the
-# chunking matches the experiment. We deliberately use the PLAIN call path (the
-# proactive chunking only) and NOT the safe_call_chunk reactive halving: a
-# reactive halving retry on a byte/token overflow would replay the failed
-# round-trip and double-count latency, so on overflow we record the cell as a
-# null failure instead (see the per-(query,K,provider) loop below).
+# Plain proactive chunking only, NOT safe_call_chunk's reactive halving: a
+# halving retry replays the failed round-trip and double-counts latency, so
+# overflows are recorded as null failures instead.
 from scaling_reranked_retrieval.adapters.retrieval.chunking import (
     MAX_DOCS_PER_CALL as _MAX_DOCS_PER_CALL,
     byte_budget_chunks as _byte_budget_chunks,
@@ -95,25 +51,17 @@ from scaling_reranked_retrieval.adapters.retrieval.providers import (
 
 from scaling_reranked_retrieval.adapters import qab
 
-# qab>=0.7 guard + load_search_dataset memoization, so the per-dataset qab
-# query load happens at most once per process.
+# qab>=0.7 guard + load_search_dataset memoization.
 qab.setup()
 
 DEFAULT_K_SWEEP = (100, 200, 500, 1000, 2000)
 DEFAULT_N_QUERIES = 5
 DEFAULT_SEED = 42
 DEFAULT_REPEATS = 3
-HYBRID_K = 2000  # measurement-2 pool size (and the largest slice for meas. 1)
+HYBRID_K = 2000
 
-# Fixed sleep between successive timed API calls, to keep provider-side
-# rate-limit throttling from skewing a timing. Applied after every rerank call
-# and between hybrid-search reps.
+# Sleep between timed API calls so rate-limit throttling doesn't skew timings.
 INTER_CALL_SLEEP_S = 0.2
-
-
-# --------------------------------------------------------------------------- #
-# Small stats helpers (no numpy dependency)                                    #
-# --------------------------------------------------------------------------- #
 
 
 def _percentile(vals: list[float], p: float) -> Optional[float]:
@@ -157,16 +105,9 @@ def _summ(vals: list[float], ndigits: int = 3) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Per-provider timed rerank (plain chunking, no reactive halving)              #
-# --------------------------------------------------------------------------- #
-#
-# Each function issues the provider's rerank API call(s) and returns when the
-# response(s) are fully received and parsed (awaiting the SDK call yields the
-# parsed response object). When the pool exceeds the per-call limit the chunks
-# are run concurrently with asyncio.gather, mirroring the experiment's fan-out
-# — so the measured latency for a 2000-doc pool is ~the latency of one
-# 1000-doc call, the real deployment cost, not the serial sum of the chunks.
+# Chunks over the per-call limit run concurrently (gather), mirroring the
+# experiment's fan-out — measured latency ≈ one chunk's latency, not the
+# serial sum.
 
 
 async def _rerank_cohere(client, model: str, query: str, docs: list[str]) -> None:
@@ -192,7 +133,7 @@ async def _rerank_voyage(client, model: str, query: str, docs: list[str]) -> Non
 
 
 async def _rerank_zerank(client, model: str, query: str, docs: list[str]) -> None:
-    # Byte-budget chunking (the proactive zerank packing), NO reactive halving.
+    # Proactive byte-budget chunking only; no reactive halving.
     chunks = _byte_budget_chunks(docs, _MAX_DOCS_PER_CALL["zerank"], _ZERANK_BYTE_BUDGET)
     await asyncio.gather(
         *(
@@ -207,11 +148,6 @@ RERANK_FNS: dict[str, Callable] = {
     "voyage": _rerank_voyage,
     "zerank": _rerank_zerank,
 }
-
-
-# --------------------------------------------------------------------------- #
-# Cell construction                                                            #
-# --------------------------------------------------------------------------- #
 
 
 def _per_query_entry(qid: str, samples_ms: list[float], n_fail: int,
@@ -230,13 +166,8 @@ def _per_query_entry(qid: str, samples_ms: list[float], n_fail: int,
 
 
 def _cell_from_per_query(per_query: list[dict]) -> dict:
-    """Roll a (provider, K) cell up from its per-query median-of-N values.
-
-    median/min/max are taken across the per-query medians; n_ok / n_fail count
-    queries (a query is ok if at least one of its reps succeeded). The full
-    per_query list (each a median of `repeats` samples with its own min/max) is
-    retained so the per-(query,K,provider) detail is auditable.
-    """
+    """Roll a (provider, K) cell up from its per-query medians; a query is ok
+    if at least one rep succeeded. per_query is retained for auditability."""
     medians = [pq["median"] for pq in per_query if pq["median"] is not None]
     n_ok = len(medians)
     n_fail = len(per_query) - n_ok
@@ -249,11 +180,6 @@ def _cell_from_per_query(per_query: list[dict]) -> dict:
         "n_fail": n_fail,
         "per_query": per_query,
     }
-
-
-# --------------------------------------------------------------------------- #
-# Provider client lifecycle                                                    #
-# --------------------------------------------------------------------------- #
 
 
 class Providers:
@@ -281,18 +207,11 @@ class Providers:
                 pass
 
 
-# --------------------------------------------------------------------------- #
-# Per-dataset measurement                                                      #
-# --------------------------------------------------------------------------- #
-
-
 def _resolve_sampled_queries(
     slug: str, n_queries: int, seed: int
 ) -> list[dict]:
-    """Sample queries from the all-three-present intersection (cache required).
-
-    Returns [{text, qid}, ...]. Raises if the k=2000 cache is missing.
-    """
+    """Sample [{text, qid}] from the all-three-present intersection; raises if
+    the k=2000 cache is missing."""
     cfg = DATASETS[slug]
     cache_path = RESULTS_DIR / cfg.results_subdir / "caches" / f"k{CACHE_K}.json"
     if not cache_path.exists():
@@ -310,8 +229,8 @@ def _resolve_sampled_queries(
         expected_collection=cfg.collection,
     )
     qs = build_query_set(cache, cfg.qab_name)
-    # Sort the intersection texts before sampling so the draw is reproducible
-    # regardless of cache insertion order.
+    # Sort before sampling so the draw is reproducible regardless of cache
+    # insertion order.
     intersection = sorted(qs.gold.keys())
     if not intersection:
         raise RuntimeError(f"Empty all-three-present intersection for {slug}.")
@@ -362,7 +281,6 @@ async def measure_dataset(
     results: dict[str, dict[int, list[dict]]] = {
         p: {K: [] for K in k_sweep} for p in PROVIDERS
     }
-    # Measurement 2 accumulators.
     hybrid_latency_per_query: list[float] = []      # median-of-reps per query
     response_payload_per_query: list[float] = []
     content_total_per_query: list[float] = []
@@ -374,8 +292,8 @@ async def measure_dataset(
         text = q["text"]
         qid = q["qid"]
 
-        # ---- Measurement 2: time the k=2000 hybrid search (repeats×), keep the
-        # last retrieval's docs as the shared candidate pool for measurement 1.
+        # Time the hybrid search (repeats×); the last retrieval's docs become
+        # the shared candidate pool for the rerank sweep.
         ret_samples: list[float] = []
         sources = None
         for rep in range(repeats):
@@ -399,8 +317,7 @@ async def measure_dataset(
         n_docs = len(pool_texts)
         n_docs_per_query.append(n_docs)
 
-        # Wire payload of the retrieval call: serialize the fields actually
-        # fetched (doc id + the requested content property + score) per hit.
+        # Wire payload: serialize the fields actually fetched per hit.
         payload_repr = [
             {"object_id": s.object_id, target_property: s.content,
              "score": s.relevance_score}
@@ -409,8 +326,7 @@ async def measure_dataset(
         response_payload_bytes = len(
             json.dumps(payload_repr, ensure_ascii=False).encode("utf-8")
         )
-        # Raw retrieved-content bytes: the document payload downstream stages
-        # (incl. the three rerankers) must move — query-shape-independent.
+        # Raw content bytes downstream stages must move (query-shape-independent).
         doc_bytes = [len(s.content.encode("utf-8")) for s in sources]
         content_total = sum(doc_bytes)
         query_bytes = len(text.encode("utf-8"))
@@ -425,9 +341,8 @@ async def measure_dataset(
               f"median={statistics.median(ret_samples):.1f}ms, {n_docs} docs, "
               f"content={content_total / 1e6:.2f}MB")
 
-        # ---- Measurement 1: rerank latency vs K. Slice the shared pool to each
-        # K (docs identical across the three providers within a (query,K)), then
-        # time each provider's rerank sequentially with the inter-call sleep.
+        # Slice the shared pool to each K (docs identical across providers
+        # within a (query, K)).
         for K in k_sweep:
             docs = pool_texts[:K]
             k_report: list[str] = []
@@ -444,8 +359,7 @@ async def measure_dataset(
                         await fn(client, model, text, docs)
                         samples.append((time.perf_counter() - t0) * 1000.0)
                     except Exception as e:  # noqa: BLE001
-                        # null-with-reason (content filter / byte- or token-limit
-                        # overflow / rate-limit). Do NOT reactively halve+retry —
+                        # Null-with-reason; do NOT reactively halve+retry —
                         # that would double-count latency.
                         n_fail += 1
                         error = f"{type(e).__name__}: {str(e)[:200]}"
@@ -459,7 +373,6 @@ async def measure_dataset(
                 )
             print(f"      K={K}: " + "  ".join(k_report), flush=True)
 
-    # ---- Build rerank_latency_ms + ensemble_latency_ms.
     rerank_latency_ms: dict[str, dict[str, dict]] = {p: {} for p in PROVIDERS}
     for provider in PROVIDERS:
         for K in k_sweep:
@@ -480,7 +393,6 @@ async def measure_dataset(
             "providers_ok": len(medians),
         }
 
-    # ---- Measurement 2 rollup.
     hybrid_k2000 = {
         "latency_ms": {
             **_summ(hybrid_latency_per_query),
@@ -526,15 +438,9 @@ async def measure_dataset(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Output                                                                       #
-# --------------------------------------------------------------------------- #
-
-
 def _latency_dir() -> Path:
     out = RESULTS_DIR / "latency"
-    # Acceptance guard: this script is timing-only and must never touch the
-    # score caches. Refuse if the output path is anywhere under a caches/ dir.
+    # Timing-only guard: output must never live under caches/.
     assert "caches" not in out.parts, "latency output must not live under caches/"
     return out
 
@@ -582,7 +488,6 @@ def write_latency_md(payloads: dict[str, dict]) -> Path:
     A(f"- Models: {models_str}")
     A("")
 
-    # Table 1: rerank latency vs K per provider (median ms across queries).
     A("## Section 3.4 — Rerank latency vs. K (median ms)")
     A("")
     A("Per (dataset, provider): median across the sampled queries of the "
@@ -613,7 +518,6 @@ def write_latency_md(payloads: dict[str, dict]) -> Path:
         A(f"| {d} | ensemble (serial_sum) | {ss} |")
     A("")
 
-    # Table 2: hybrid k=2000 latency + payload per dataset.
     A("## Section 3.3 — Hybrid k=2000 latency + payload (median across queries)")
     A("")
     A("`hybrid latency` is median single-query wall-clock for a k=2000 hybrid "
@@ -650,11 +554,6 @@ def write_latency_md(payloads: dict[str, dict]) -> Path:
         f.write("\n".join(lines) + "\n")
     print(f"wrote {path}")
     return path
-
-
-# --------------------------------------------------------------------------- #
-# CLI                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def _parse_k_sweep(s: str) -> tuple[int, ...]:

@@ -1,9 +1,4 @@
-"""Two-stage retrieve-then-rerank retriever.
-
-Runs first-stage retrieval via BaseRetriever, then rescores the pool with the
-hosted cohere/voyage/zerank rerankers (a single provider, or "hybrid" = all
-available fused with RRF/RSF) and returns the reranked top reranked_k.
-"""
+"""Two-stage retrieve-then-rerank retriever (single provider, or "hybrid" fused with RRF/RSF)."""
 from typing import Optional, List, Dict
 
 import weaviate
@@ -61,7 +56,6 @@ class CrossEncoderReranker(BaseRetriever):
         weaviate_client = weaviate_client or self.weaviate_client
         reranker_clients = reranker_clients or self.reranker_clients
 
-        # Retrieve
         sources = weaviate_search_tool(
             weaviate_client=weaviate_client,
             query=question,
@@ -76,7 +70,6 @@ class CrossEncoderReranker(BaseRetriever):
 
         all_clients = list(reranker_clients) if reranker_clients else []
 
-        # Rerank
         docs = [truncate_document(s.content, 500) for s in sources]
         items = ce_rank(
             query=question,
@@ -112,7 +105,6 @@ class CrossEncoderReranker(BaseRetriever):
         weaviate_async_client = weaviate_async_client or self.weaviate_async_client
         reranker_clients = reranker_clients or self.reranker_clients
 
-        # Retrieve
         sources = await async_weaviate_search_tool(
             weaviate_async_client=weaviate_async_client,
             query=question,
@@ -127,7 +119,6 @@ class CrossEncoderReranker(BaseRetriever):
 
         all_clients = list(reranker_clients) if reranker_clients else []
 
-        # Rerank
         docs = [truncate_document(s.content, 500) for s in sources]
         items = await async_ce_rank(
             query=question,

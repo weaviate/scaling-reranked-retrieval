@@ -1,9 +1,6 @@
 """First-stage hybrid-search retriever over Weaviate.
 
-``forward``/``aforward`` run one hybrid (BM25 + dense) search and return an
-AgentRAGResponse whose ``.sources`` hold the retrieved pool.
-``pyversity``/``numpy`` are imported lazily inside ``_maybe_diversify`` so
-the diversification path (unused by the experiment, ``diversity_weight=0``)
+pyversity/numpy are imported lazily so the unused diversification path
 doesn't force the dependency.
 """
 from __future__ import annotations
@@ -45,8 +42,7 @@ class BaseRetriever:
     ) -> None:
         self.collection_name = collection_name
 
-        # Only treat the client slots as a backend source when they hold real
-        # clients (callers may pass None through).
+        # Client slots may hold None; only real clients become a backend source.
         sync_client = (
             weaviate_client
             if isinstance(weaviate_client, weaviate.WeaviateClient)

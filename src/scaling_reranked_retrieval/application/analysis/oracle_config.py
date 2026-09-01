@@ -1,66 +1,8 @@
 """Oracle-config decomposition: routing value vs blending value, swept over k.
 
-Quantifies how much of the per-query reranking optimum comes from ROUTING
-(choosing the single best singleton per query) versus BLENDING (choosing an
-interior fusion of several rerankers per query). Fully --k-parameterized; the
-paper sweeps retrieved_k in {100, 200, 500, 1000, 2000}, each writing its own
-oracle_config_k{N}.{json,_table.md}. retrieved_k=200 is the clean reference
-operating point (Cohere healthy). This is the empirical core of the Section 5.1
-routing-vs-blending argument. (The file name still says k200 for historical
-reasons; it is a general k sweep — see the --k flag.)
-
-Three per-query reference quantities, all over the same active condition menu
-(equal-weight only) the main experiment runs (3 singletons + the equal-weight
-RRF/RSF fusion blends; excludes hybrid_only):
-
-  1. best static fusion — ONE fixed fusion blend, chosen once as the argmax of
-     the per-query median of a primary metric over the blends, then applied
-     to every query. Selected GLOBALLY (one blend across all five subsets) for
-     the headline; a per-subset-tuned variant is reported in an appendix. Per
-     the resolved spec decision, a SINGLE config anchors every metric row (the
-     blend that wins the primary selection metric, SELECTION_METRIC), so the
-     routing-value column is "oracle-selector minus the one blend you deploy."
-  2. oracle-selector — per query, the best of the three singletons. Pure
-     routing: a perfect per-query router constrained to one model's list.
-  3. oracle-config  — per query, the best of every condition in the menu. Adds
-     the freedom to choose an interior blend per query.
-
-Two gaps:
-  routing value  = median(oracle-selector) - median(best static fusion)
-  blending value = median(oracle-config)   - median(oracle-selector)
-
-DERIVE-ONCE CORRECTNESS. Every condition at k=200 is materialized by
-DerivedSearchAgent from the cached k=2000 scores, restricted to the top-200
-hybrid pool. That path recomputes RRF ranks within the 200-doc set and re-does
-RSF min-max normalization ON THE RESTRICTED 200-doc pool (never inheriting the
-k=2000 normalization) — the single most common way this analysis goes silently
-wrong. Reusing DerivedSearchAgent (rather than re-implementing the sort)
-guarantees the rankings are byte-identical to the runs/ derive path. Zero
-reranker API calls: this module never imports a provider client.
-
-Aggregation is MEAN across queries per subset, and MEDIAN across subsets for
-the aggregate row (each quantity aggregated independently). NOTE: the spec said
-"median across queries", but per-query recall@K is too coarse for a median —
-for most queries it is exactly 0, otherwise 1/|gold| — so a query-median
-collapses to a single representative query's value and can never reproduce the
-smooth blending-value bands the spec's own acceptance criteria cite (those are
-means, as is every other number in this experiment and agreement_analysis.py).
-We therefore aggregate across queries with the MEAN; median is retained only
-for the cross-subset aggregate, where 5 subset-level means make it sensible.
-The query universe
-per subset is the all-three-present intersection (the same set
-agreement_analysis uses), so every condition in the menu is defined for
-every query and the per-query max is clean — guaranteeing
-oracle_config >= oracle_selector >= best singleton, per query and per median.
-
-Outputs (under results/):
-  oracle_config_k{K}.json        — machine-readable decomposition
-  oracle_config_k{K}_table.md    — the figure-replacing table (one block/metric)
-
-Usage:
-    uv run python scripts/oracle_config.py
-    uv run python scripts/oracle_config.py --k 2000   # 5.2 toggle
-    uv run python scripts/oracle_config.py --smoke
+Derived from the k=2000 score cache via DerivedSearchAgent (RSF normalization
+recomputed on the restricted pool); zero reranker API calls. Mean across
+queries per subset, median across subsets, over the all-three intersection.
 """
 from __future__ import annotations
 
@@ -95,21 +37,11 @@ from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
-# --------------------------------------------------------------------------- #
-# Configuration                                                                #
-# --------------------------------------------------------------------------- #
-
-RETRIEVED_K = 200            # clean operating point (Cohere healthy; see spec).
+RETRIEVED_K = 200            # clean operating point (Cohere healthy).
 RERANKED_K = 20              # deployed output cap; top-20 covers R@1/5/20/nDCG@10.
-CACHE_K = 2000               # provenance: derive everything from the k=2000 cache.
+CACHE_K = 2000
 
-# Subsets in canonical order (spec Procedure).
 SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
-
-
-# --------------------------------------------------------------------------- #
-# Invariants (acceptance criteria)                                            #
-# --------------------------------------------------------------------------- #
 
 
 def check_invariants(
@@ -117,10 +49,7 @@ def check_invariants(
 ) -> list[str]:
     """oracle_config >= oracle_selector >= each singleton; >= best static fusion.
 
-    Checked on the query means (which inherit the per-query domination because
-    the per-query max pointwise-dominates each component, and the mean is
-    monotone under pointwise domination). `menu`/`singletons` default to the
-    full menu; pass restricted lists to check a sub-menu (noise_null.py).
+    Checked on query means; pass restricted `menu`/`singletons` to check a sub-menu.
     """
     errs: list[str] = []
     singleton_names = [c.name for c in singletons]
@@ -140,14 +69,8 @@ def check_invariants(
     return errs
 
 
-# --------------------------------------------------------------------------- #
-# Driver                                                                       #
-# --------------------------------------------------------------------------- #
-
-
 def run(k: int, reranked_k: int, write: bool = True) -> dict:
     """Compute the decomposition for every subset at retrieved_k=k."""
-    # 1. Materialize per-query per-condition metrics for each subset.
     tables: dict[str, dict] = {}
     queries_by_subset: dict[str, list[str]] = {}
     drops_by_subset: dict[str, dict] = {}
@@ -168,8 +91,7 @@ def run(k: int, reranked_k: int, write: bool = True) -> dict:
     if not present:
         raise SystemExit("No subsets had a usable k=2000 cache.")
 
-    # 2. GLOBAL best static fusion: argmax over the fusion blends of the median of
-    #    SELECTION_METRIC over the POOLED query set (all subsets concatenated).
+    # Global best static fusion: one blend selected over the pooled query set.
     pooled_sel: dict[str, list[float]] = {
         c.name: [] for c in FUSION_CONFIGS
     }
@@ -182,15 +104,12 @@ def run(k: int, reranked_k: int, write: bool = True) -> dict:
         f"queries): {global_config} (mean={global_median:.4f})"
     )
 
-    # 3. Per-subset decomposition with the GLOBAL config (headline) + per-subset
-    #    tuned config (appendix). Also run invariant checks per subset.
     per_subset: dict[str, dict] = {}
     per_subset_tuned: dict[str, dict] = {}
     all_invariant_errors: dict[str, list[str]] = {}
     for ds in present:
         n = len(queries_by_subset[ds])
         per_subset[ds] = _decompose(tables[ds], n, global_config)
-        # Per-subset-tuned config: argmax within this subset.
         sub_sel = {c.name: tables[ds][c.name][SELECTION_METRIC] for c in FUSION_CONFIGS}
         tuned_config, tuned_median = select_best_static_fusion(sub_sel)
         per_subset_tuned[ds] = {
@@ -203,8 +122,7 @@ def run(k: int, reranked_k: int, write: bool = True) -> dict:
             all_invariant_errors[ds] = errs
             print(f"  [WARN] invariant errors ({ds}): {errs}")
 
-    # 4. Aggregate: median across subsets of each quantity, per metric (global
-    #    config headline).
+    # Aggregate: median across subsets, each quantity aggregated independently.
     quantities = (
         "best_static_fusion",
         "oracle_selector",
@@ -269,11 +187,6 @@ def run(k: int, reranked_k: int, write: bool = True) -> dict:
         print(f"Wrote {md_path}")
 
     return payload
-
-
-# --------------------------------------------------------------------------- #
-# Markdown table (figure-replacing)                                           #
-# --------------------------------------------------------------------------- #
 
 
 def _f(x: Optional[float]) -> str:
@@ -345,7 +258,6 @@ def render_table(payload: dict, present: list[str]) -> str:
         A("| **aggregate** | " + " | ".join(f"**{_f(agg[kk])}**" for kk in keys) + " |")
         A("")
 
-    # Appendix: per-subset-tuned best static fusion (domain-tuning ceiling).
     A("## Appendix: per-subset-tuned best static fusion")
     A("")
     A(
@@ -368,11 +280,6 @@ def render_table(payload: dict, present: list[str]) -> str:
     A("")
 
     return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------- #
-# CLI                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def run_smoke() -> None:

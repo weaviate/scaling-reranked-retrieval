@@ -1,33 +1,7 @@
-"""Equal-weight 3-way vs. equal-weight pairs — read-only extraction (zero API calls).
+"""Equal-weight 3-way vs. equal-weight pairs — read-only extraction.
 
-Isolates the *combinatorics of which rerankers to include* from the *weighting*
-question by holding weights fixed at uniform and comparing the equal-weight
-3-way (cohere+voyage+zerank, 1/3 each) against the best equal-weight PAIR
-(cohere+voyage, cohere+zerank, voyage+zerank, 0.5/0.5 each), under each fusion
-method (RRF and RSF) separately.
-
-Reads ONLY the per-run summary JSONs already on disk:
-  - R@1 / R@5 / R@20 / nDCG@10 at reranked_k=20 from results/bright_<slug>/runs/
-    (per-(subset,k) auto-resolved; falls back to runs_rk100/ when runs/ is
-    absent OR is a stub missing the equal-weight keys — e.g. biology's k=200
-    runs/ file holds only hybrid_only).
-  - R@50 / R@100 at reranked_k=100 from results/bright_<slug>/runs_rk100/ for
-    every subset.
-
-NEVER opens caches/ (a startup assertion enforces it). No reranker API calls,
-no cache derivation — just sorts/reads over existing summary JSONs.
-
-Outputs under results/equal_weight/:
-  equal_weight_matrix.{json,parquet}   — full tidy matrix (one row per
-                                          subset×k×metric×fusion)
-  EQUAL_WEIGHT.md                      — human-readable report (3.2 a/b/c)
-  equal_weight_table.md                — wide CSV-like dump for spot-checking
-
-Usage:
-    uv run python scripts/equal_weight.py
-    uv run python scripts/equal_weight.py --smoke
-    uv run python scripts/equal_weight.py --subsets biology economics
-    uv run python scripts/equal_weight.py --k 200
+Reads only run-summary JSONs already on disk; never opens caches/ and makes
+zero reranker API calls.
 """
 from __future__ import annotations
 
@@ -40,17 +14,11 @@ import pandas as pd
 
 from scaling_reranked_retrieval.config import RESULTS_DIR
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 OUT_DIR = RESULTS_DIR / "equal_weight"
 
 ALL_SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
 ALL_KS = [100, 200, 500, 1000, 2000]
 
-# The 8 equal-weight condition keys, grouped by family. Per fusion method we
-# read the four columns (three pairs + the 3-way).
 FUSIONS = ["rrf", "rsf"]
 FAMILY_KEYS = {
     "cv_pair": "{f}_cv_equal",     # cohere + voyage
@@ -59,10 +27,7 @@ FAMILY_KEYS = {
     "threeway": "{f}_equal_3way",  # all three
 }
 
-# Individual cross-encoders (singletons). These are NOT fusion-method-specific —
-# a single reranker's output is the same whether we'd later fuse via RRF or RSF —
-# so the same value is recorded on both the rrf and rsf rows of a (subset, k,
-# metric) cell. Read from the same source file as the metric.
+# Singletons are fusion-independent; the same value lands on both rrf and rsf rows.
 SINGLETON_KEYS = {
     "cohere": "cohere_only",
     "voyage": "voyage_only",
@@ -75,8 +40,7 @@ def equal_weight_keys() -> list[str]:
     return [tmpl.format(f=f) for f in FUSIONS for tmpl in FAMILY_KEYS.values()]
 
 
-# Display metric -> (json metric base, source family). rk20 metrics come from
-# runs/ (fallback runs_rk100/); rk100 metrics always from runs_rk100/.
+# rk20 metrics come from runs/ (fallback runs_rk100/); rk100 always runs_rk100/.
 RK20_METRICS = {
     "recall@1": "recall_at_1",
     "recall@5": "recall_at_5",
@@ -89,18 +53,14 @@ RK100_METRICS = {
 }
 ALL_METRICS = {**RK20_METRICS, **RK100_METRICS}
 
-# Order used throughout the report: primary, sidekicks, deep recall.
 METRIC_ORDER = ["recall@1", "recall@20", "recall@5", "ndcg@10", "recall@50", "recall@100"]
 
-# Noise band: do not declare a winner inside ±0.01 (Section 3.2b / Section 4.2). RSF-equal
-# cells additionally carry ~1-query PYTHONHASHSEED tie wobble, also covered by
-# this band.
+# Noise band: no winner declared inside ±0.01 (~1 query on R@1); also covers the
+# RSF-equal ~1-query PYTHONHASHSEED tie wobble.
 NOISE_BAND = 0.01
 
-# Regression guard: (subset, k, metric, condition, expected). Drawn from
-# CLAUDE.md's published cross-domain tables where an equal-weight condition is
-# the `Best fusion` winner. Tolerance = RSF tie tolerance (±0.01). Catches
-# metric-key mismatches and wrong-file reads.
+# Regression guard vs published cross-domain best-fusion winners; tolerance
+# ±0.01 (RSF tie wobble). Catches metric-key mismatches and wrong-file reads.
 REGRESSION_GUARD = [
     ("earth_science", 2000, "recall@1", "rsf_equal_3way", 0.579),
     ("earth_science", 200, "recall@1", "rsf_equal_3way", 0.535),
@@ -110,35 +70,22 @@ REGRESSION_GUARD = [
 ]
 GUARD_TOL = 0.01
 
-# Expected Section (d) "best singleton" median lines for the FULL run (all 5 subsets,
-# all k). Guards (a) the median groupby is keyed right and (b) the values
-# reproduce the published Section (d) table (spec Section 4.4/Section 4.5). Only checked when the
-# run covers ALL_SUBSETS × ALL_KS. best singleton = per-subset max of the
-# three singletons, THEN cross-subset median.
+# Expected best-singleton median lines; only checked on a full run
+# (ALL_SUBSETS × ALL_KS). best singleton = per-subset max of the three
+# singletons, THEN cross-subset median.
 BEST_SINGLETON_GUARD = {
     "recall@1": [0.340, 0.414, 0.366, 0.386, 0.376],
     "recall@20": [0.395, 0.468, 0.564, 0.588, 0.597],
 }
 
-# Per-domain plot lines (the 3-row fusion figure: row 1 = median, row 2 =
-# psychology [most], row 3 = robotics [least], by the documented best-fusion R@1
-# lift). Pure passthrough of per-subset matrix cells — no median, no new metric.
+# Per-domain plot lines: passthrough of per-subset matrix cells — no median.
 PER_DOMAIN_DEFAULT = ["psychology", "robotics"]
 PER_DOMAIN_METRICS = ["recall@1", "recall@20"]
-# Spot-check vs CLAUDE.md published singletons (±GUARD_TOL).
+# Spot-check vs published singletons (±GUARD_TOL).
 PER_DOMAIN_GUARD = [
     ("psychology", 200, "recall@1", "cohere", 0.414),
     ("robotics", 2000, "recall@1", "zerank", 0.292),
 ]
-
-# The former --fixed-weight (equal-vs-tilt) analysis was removed 2026-07-10 with
-# the equal-weight-only menu policy; see git history.
-
-
-# ---------------------------------------------------------------------------
-# JSON reading (matches oracle_config_k200.py / agreement_analysis.py: the
-# runs-file metric key is `avg_{metric}_mean`).
-# ---------------------------------------------------------------------------
 
 _FILE_CACHE: dict[Path, dict] = {}
 
@@ -172,11 +119,6 @@ def _has_all_equal_weight_keys(results: dict) -> bool:
     return all(k in results for k in equal_weight_keys())
 
 
-# ---------------------------------------------------------------------------
-# Source resolution (Section 2)
-# ---------------------------------------------------------------------------
-
-
 def _subset_base(subset: str) -> Path:
     return RESULTS_DIR / f"bright_{subset}"
 
@@ -184,10 +126,8 @@ def _subset_base(subset: str) -> Path:
 def resolve_rk20_source(subset: str, k: int) -> tuple[Path, str, dict]:
     """rk20 metrics: prefer runs/ if it has all 8 keys; else fall back to runs_rk100/.
 
-    Detect by file existence + key presence (NOT a hard-coded subset list), so
-    biology's stub k=200 runs/ file and psychology/robotics' absent runs/ both
-    resolve correctly, and a future re-collect that adds runs/ is picked up
-    automatically.
+    Detected by key presence, not a hard-coded subset list, so stub files and
+    future re-collects resolve correctly.
     """
     runs_dir = _subset_base(subset) / "runs"
     for cand in sorted(runs_dir.glob(f"k{k}_from_k*.json")):
@@ -196,8 +136,7 @@ def resolve_rk20_source(subset: str, k: int) -> tuple[Path, str, dict]:
             continue
         if _has_all_equal_weight_keys(doc["results"]):
             return cand, "runs", doc
-    # Fallback: the rk100 sweep (R@1/R@5/R@20/nDCG@10 differ from the rk20 sweep
-    # only within the noise band — see CLAUDE.md).
+    # rk100 sweep differs from the rk20 sweep only within the noise band.
     fb = _subset_base(subset) / "runs_rk100" / f"k{k}_from_k2000.json"
     if not fb.exists():
         raise FileNotFoundError(
@@ -225,18 +164,11 @@ def resolve_rk100_source(subset: str, k: int) -> tuple[Path, str, dict]:
     return path, "runs_rk100", doc
 
 
-# ---------------------------------------------------------------------------
-# Row construction
-# ---------------------------------------------------------------------------
-
-
 def build_rows(subsets: list[str], ks: list[int], metrics: list[str]) -> list[dict]:
     rows: list[dict] = []
     for subset in subsets:
         for k in ks:
-            # Resolve the two possible sources once per (subset, k).
             rk20_path, rk20_src, rk20_doc = resolve_rk20_source(subset, k)
-            # Only resolve rk100 if a deep-recall metric is requested.
             rk100_path = rk100_src = rk100_doc = None
             if any(m in RK100_METRICS for m in metrics):
                 rk100_path, rk100_src, rk100_doc = resolve_rk100_source(subset, k)
@@ -254,7 +186,6 @@ def build_rows(subsets: list[str], ks: list[int], metrics: list[str]) -> list[di
                 results = doc["results"]
                 where = f"{path}"
 
-                # Singletons are fusion-independent — read once per (subset, k, metric).
                 singletons = {
                     col: _metric_value(results, key, json_base, where=where)
                     for col, key in SINGLETON_KEYS.items()
@@ -283,9 +214,8 @@ def build_rows(subsets: list[str], ks: list[int], metrics: list[str]) -> list[di
                         "cohere": singletons["cohere"],
                         "voyage": singletons["voyage"],
                         "zerank": singletons["zerank"],
-                        # per-cell max of the three singletons; the Section (d) "best
-                        # singleton" line is the cross-subset MEDIAN of this column
-                        # (per-subject max THEN median — never max-of-medians).
+                        # per-cell max; the report's line is per-subset max THEN
+                        # cross-subset median — never max-of-medians.
                         "best_singleton": max(singletons.values()),
                         "cv_pair": cv,
                         "cz_pair": cz,
@@ -299,11 +229,6 @@ def build_rows(subsets: list[str], ks: list[int], metrics: list[str]) -> list[di
                         "source_file": str(path.relative_to(RESULTS_DIR)),
                     })
     return rows
-
-
-# ---------------------------------------------------------------------------
-# Regression guard (Section 4.6)
-# ---------------------------------------------------------------------------
 
 
 def run_regression_guard() -> list[str]:
@@ -329,10 +254,9 @@ def run_regression_guard() -> list[str]:
 
 def run_best_singleton_guard(rows: list[dict], subsets: list[str],
                              ks: list[int]) -> list[str]:
-    """Guard the `best singleton` line: definitional (per-row max) always, and
-    the full-run median lines against the published Section (d) values (spec Section 4.4/Section 4.5)."""
+    """Guard the `best singleton` line: definitional per-row max always, plus the
+    full-run median lines against published values."""
     notes: list[str] = []
-    # Definitional: best_singleton is the per-cell max of the three singletons.
     for r in rows:
         mx = max(r["cohere"], r["voyage"], r["zerank"])
         if abs(r["best_singleton"] - mx) > 1e-12:
@@ -340,15 +264,14 @@ def run_best_singleton_guard(rows: list[dict], subsets: list[str],
                 f"best_singleton != max(singletons) at {r['subset']} k={r['k']} "
                 f"{r['metric']}/{r['fusion']}: {r['best_singleton']} vs {mx}"
             )
-    # Median lines are only comparable to the hard-coded expectations on the
-    # full population.
+    # Median lines only comparable to expectations on the full population.
     if subsets != ALL_SUBSETS or ks != ALL_KS:
         notes.append("  (best-singleton median guard skipped — partial run)")
         return notes
     for metric, expected in BEST_SINGLETON_GUARD.items():
         got = []
         for k in ALL_KS:
-            # singletons are fusion-independent → read the rrf rows only.
+            # Singletons are fusion-independent → read the rrf rows only.
             vals = [r["best_singleton"] for r in rows
                     if r["metric"] == metric and r["fusion"] == "rrf"
                     and r["k"] == k]
@@ -364,13 +287,8 @@ def run_best_singleton_guard(rows: list[dict], subsets: list[str],
     return notes
 
 
-# ---------------------------------------------------------------------------
-# Tagging
-# ---------------------------------------------------------------------------
-
-
 def tag_delta(delta: float) -> str:
-    """win / lose / ~tie per the ±0.01 noise band (Section 3.2b / Section 4.2)."""
+    """win / lose / ~tie per the ±0.01 noise band."""
     if delta > NOISE_BAND:
         return "win"
     if delta < -NOISE_BAND:
@@ -387,11 +305,6 @@ def _sgn3(v: float) -> str:
 
 def fmt_delta(delta: float) -> str:
     return f"{_sgn3(delta)} {tag_delta(delta)}"
-
-
-# ---------------------------------------------------------------------------
-# Markdown report (Section 3.2)
-# ---------------------------------------------------------------------------
 
 
 def _df(rows: list[dict]) -> pd.DataFrame:
@@ -413,7 +326,6 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
              "`runs*/` summary JSONs (zero reranker-API calls, caches/ never opened).")
     L.append("")
 
-    # --- Banners ---------------------------------------------------------
     L.append("## ⚠️ Caveats — read before citing")
     L.append("")
     if "robotics" in subsets:
@@ -434,7 +346,6 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
              "in this report.")
     L.append("")
 
-    # --- (a) Per-metric headline tables ----------------------------------
     L.append("## (a) Per-metric headline tables")
     L.append("")
     L.append("Columns: `cv` (cohere+voyage) · `cz` (cohere+zerank) · `vz` "
@@ -469,7 +380,6 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
                     )
             L.append("")
 
-    # --- (b) Thesis summary ---------------------------------------------
     L.append("## (b) Thesis summary — `threeway_minus_best_pair` per (subset, metric, fusion)")
     L.append("")
     L.append("Per-k vector of `3way − best_pair` and the median across k. "
@@ -502,7 +412,6 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
                 )
         L.append("")
 
-    # --- (c) Aggregate ---------------------------------------------------
     L.append("## (c) Cross-domain aggregate — median of `threeway_minus_best_pair` across subsets")
     L.append("")
     L.append("Median across all subsets of `3way − best_pair` per (metric, fusion, k).")
@@ -523,7 +432,6 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
             L.append(f"| {metric} | " + " | ".join(cells) + " |")
         L.append("")
 
-    # --- (d) Plottable absolute lines -----------------------------------
     L.append("## (d) Absolute lines for plotting — singletons, pairs, and the 3-way")
     L.append("")
     L.append("Each condition's **absolute** metric value, as the **cross-subset "
@@ -573,7 +481,6 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
             L.append("")
     L.append("")
 
-    # --- Headline one-liners --------------------------------------------
     L.append("## One-line claims (operating point k=200)")
     L.append("")
     op_k = 200 if 200 in ks else ks[len(ks) // 2]
@@ -624,21 +531,14 @@ def write_wide_table_md(rows: list[dict]) -> Path:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Per-domain plot lines (spec section: 3-row fusion figure)
-# ---------------------------------------------------------------------------
-
-
 def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
                            metrics: list[str]) -> tuple[Path, Path] | None:
-    """Emit each requested domain's own five plot lines (passthrough, no median).
+    """Emit each requested domain's own plot lines (passthrough, no median).
 
-    Rows 2/3 of the figure (psychology=most, robotics=least) need per-subject
-    lines, not a cross-subset median. Pairs/3-way are read at RSF (the figure's
-    fusion); singletons are fusion-independent. `fusion_over_best_singleton` =
-    best equal pair (RSF) − best singleton, the signed effect the most/least
-    pick is ranked by (NOTE: uniform-weight floor, smaller than the best-fusion
-    lift in Section "Cross-domain" — see the figure-caption note in the spec)."""
+    Pairs/3-way are read at RSF; singletons are fusion-independent.
+    `fusion_over_best_singleton` = best equal pair (RSF) − best singleton — the
+    uniform-weight floor, smaller than the best-fusion lift.
+    """
     df = _df(rows)
     out_subsets = [s for s in want_subsets
                    if s in set(df["subset"]) ]
@@ -648,7 +548,7 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
               f"absent from this run: want={want_subsets}, have R@1/R@20={use_metrics})")
         return None
 
-    # Regression guard: spot-check published singletons (only the cells present).
+    # Spot-check published singletons (only the cells present).
     for subset, k, metric, col, expected in PER_DOMAIN_GUARD:
         sel = df[(df["subset"] == subset) & (df["k"] == k) & (df["metric"] == metric)
                  & (df["fusion"] == "rsf")]
@@ -686,10 +586,8 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
                     "fusion_over_best_singleton": float(r["best_pair"]) - float(r["best_singleton"]),
                 })
 
-    # Most/least sanity (spec Section 4.2): psychology's R@1 fusion-over-best-singleton
-    # effect must come out clearly above robotics's, else a wrong column is read.
-    # Use the across-k PEAK — the equal-RSF effect is depth-concentrated; at
-    # k=200 psychology ties (cohere alone is its published R@1 winner).
+    # Most/least sanity: psychology's R@1 effect must clearly exceed robotics's.
+    # Uses the across-k PEAK — the equal-RSF effect is depth-concentrated.
     def _r1_peak(sub: str):
         e = [rec["fusion_over_best_singleton"] for rec in records
              if rec["subset"] == sub and rec["metric"] == "recall@1"]
@@ -711,7 +609,6 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
     csv_path = out_dir / "per_domain_lines.csv"
     pdf.to_csv(csv_path, index=False)
 
-    # Markdown: two tables (R@1, R@20) per subset.
     L: list[str] = ["# Per-domain plot lines (3-row fusion figure)", ""]
     L.append("Each domain's own five lines (`cohere`/`voyage`/`zerank` singletons, "
              "`best_pair_rsf`, `threeway_rsf`) plus `best_singleton` (per-cell "
@@ -766,11 +663,6 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
     return csv_path, md_path
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -794,7 +686,6 @@ def main() -> None:
         ks = args.k or ALL_KS
         metrics = list(ALL_METRICS.keys())
 
-    # Startup assertion: output never lives under caches/ (mirror latency_measurement.py).
     assert "caches" not in OUT_DIR.parts, "equal_weight output must not live under caches/"
 
     print(f"subsets={subsets}  ks={ks}  metrics={metrics}")
@@ -812,7 +703,6 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     df = _df(rows)
 
-    # Full-precision artifacts (no rounding).
     matrix_json = OUT_DIR / "equal_weight_matrix.json"
     with matrix_json.open("w") as fh:
         json.dump(rows, fh, indent=2)
@@ -824,8 +714,6 @@ def main() -> None:
 
     written = [matrix_json, matrix_parquet, md, wide]
 
-    # Per-domain plot lines: --per-domain-lines with names, bare flag, or omitted
-    # on a full run → default to psychology+robotics.
     per_domain_want = args.per_domain_lines if args.per_domain_lines else PER_DOMAIN_DEFAULT
     pd_paths = write_per_domain_lines(rows, per_domain_want, metrics)
     if pd_paths is not None:

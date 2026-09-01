@@ -1,30 +1,8 @@
 """Per-reranker unique successes at k=200.
 
-A reranker has a UNIQUE SUCCESS on a query (at cutoff K) when it lands a gold
-doc in its top-K while BOTH other rerankers miss. This is the per-model
-heterogeneity story — the queries each reranker alone rescues — and it is the
-singleton cells of the R@1 correctness Venn (agreement_analysis.py) generalized
-to K in {1, 5, 20} and with the actual queries listed so you can inspect them.
-
-"Success at K" = recall@K > 0, i.e. at least one gold doc in the reranker's
-top-K (a hit). nDCG has no hit/miss notion, so it is not used here.
-
-Everything is derived from the k=2000 score caches at retrieved_k=200,
-reranked_k=20 (the deployed output cap), via DerivedSearchAgent — RSF
-normalization recomputed on the restricted 200-doc pool, zero reranker API
-calls. The query universe per subset is the all-three-present intersection (the
-same set agreement_analysis / oracle_config_k200 use), which is required for
-"unique" to be well-defined: you can only claim the other two missed if both
-actually scored the query.
-
-Outputs (under results/):
-  unique_successes_k{K}.json      — counts + the unique-success query lists
-  unique_successes_k{K}_table.md  — counts table per cutoff + per-reranker lists
-
-Usage:
-    uv run python scripts/unique_successes.py
-    uv run python scripts/unique_successes.py --k 2000
-    uv run python scripts/unique_successes.py --list-cutoff 1
+Unique success @K = a reranker lands a gold doc in its top-K while both others
+miss (Success@K = recall@K > 0). Computed over the all-three-present
+intersection — required for "unique" to be well-defined; zero reranker API calls.
 """
 from __future__ import annotations
 
@@ -40,18 +18,13 @@ from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
-# --------------------------------------------------------------------------- #
-# Configuration                                                                #
-# --------------------------------------------------------------------------- #
-
 RETRIEVED_K = 200
 RERANKED_K = 20                  # deployed output cap; success cutoffs are <= 20.
 CACHE_K = 2000
-SUCCESS_CUTOFFS = (1, 5, 20)     # K for "gold in top-K".
+SUCCESS_CUTOFFS = (1, 5, 20)
 SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
 
-# The three singleton conditions, keyed by provider, taken straight from the
-# experiment's CONDITIONS so the ranking is byte-identical to the main harness.
+# Taken straight from CONDITIONS so rankings are byte-identical to the harness.
 _SINGLETON_BY_PROVIDER = {
     c.provider: c
     for c in _RE_CONDITIONS
@@ -59,13 +32,7 @@ _SINGLETON_BY_PROVIDER = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Core                                                                         #
-# --------------------------------------------------------------------------- #
-
-
 def _singleton_top20(cache, query: str, provider: str, k: int, reranked_k: int) -> list[str]:
-    """Top-`reranked_k` doc ids for one reranker over the top-k hybrid pool."""
     agent = DerivedSearchAgent(
         cache=cache,
         retrieved_k=k,
@@ -80,13 +47,10 @@ def analyze_subset(cache, qs, k: int, reranked_k: int) -> dict:
     queries = list(qs.gold.keys())
     n = len(queries)
 
-    # counts[K][provider] = {"success": int, "unique": int, "unique_queries": [...]}
     counts = {
         K: {p: {"success": 0, "unique": 0, "unique_queries": []} for p in PROVIDERS}
         for K in SUCCESS_CUTOFFS
     }
-    # Query-population breakdown per cutoff: how many queries at least one
-    # reranker hit, and how many all three missed (unreachable by any singleton).
     coverage = {K: {"any_hit": 0, "all_miss": 0} for K in SUCCESS_CUTOFFS}
 
     for text in queries:
@@ -103,18 +67,13 @@ def analyze_subset(cache, qs, k: int, reranked_k: int) -> dict:
             for p in PROVIDERS:
                 if hit[p]:
                     counts[K][p]["success"] += 1
-                    if n_hits == 1:  # only this reranker hit
+                    if n_hits == 1:
                         counts[K][p]["unique"] += 1
                         counts[K][p]["unique_queries"].append(
                             {"query_id": qid, "query": text}
                         )
 
     return {"n_queries_intersection": n, "counts": counts, "coverage": coverage}
-
-
-# --------------------------------------------------------------------------- #
-# Driver                                                                       #
-# --------------------------------------------------------------------------- #
 
 
 def run(k: int, reranked_k: int, list_cutoff: int, write: bool = True) -> dict:
@@ -135,8 +94,7 @@ def run(k: int, reranked_k: int, list_cutoff: int, write: bool = True) -> dict:
     if not present:
         raise SystemExit("No subsets had a usable k=2000 cache.")
 
-    # Aggregate: sum counts across subsets (counts, not means — these are
-    # absolute query tallies; a fraction would hide which domains contribute).
+    # Aggregate sums absolute query tallies across subsets, not means.
     aggregate = {
         K: {
             **{
@@ -182,11 +140,6 @@ def run(k: int, reranked_k: int, list_cutoff: int, write: bool = True) -> dict:
     return payload
 
 
-# --------------------------------------------------------------------------- #
-# Markdown                                                                     #
-# --------------------------------------------------------------------------- #
-
-
 def render_table(payload: dict, present: list[str], list_cutoff: int) -> str:
     k = payload["k"]
     lines: list[str] = []
@@ -228,7 +181,6 @@ def render_table(payload: dict, present: list[str], list_cutoff: int) -> str:
           + f" | **{agg['any_hit']}** | **{agg['all_miss']}** |")
         A("")
 
-    # Per-reranker query listing at the chosen cutoff.
     A(f"## Unique-success queries @{list_cutoff}")
     A("")
     A(f"The actual queries each reranker uniquely rescues at K={list_cutoff} "
@@ -249,11 +201,6 @@ def render_table(payload: dict, present: list[str], list_cutoff: int) -> str:
                 A(f"- `{q['query_id']}` — {snippet}")
             A("")
     return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------- #
-# CLI                                                                          #
-# --------------------------------------------------------------------------- #
 
 
 def main() -> None:

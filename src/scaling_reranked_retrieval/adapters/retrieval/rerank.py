@@ -1,11 +1,4 @@
-"""Reranking dispatch: adapter registry, provider selection, fusion, entry points.
-
-`ce_rank` / `async_ce_rank` are the top-level calls the retrievers use: they
-turn a list of RerankerClient wrappers into per-provider rerank callables
-(retrieval.providers), pick a provider (a single one, or "hybrid" = run all
-available and fuse with RRF/RSF), and return reranked RerankItems. `reorder`
-maps those items back onto the retrieved ObjectFromDB sources.
-"""
+"""Reranking dispatch: adapter registry, provider selection, fusion, entry points."""
 from __future__ import annotations
 
 import asyncio
@@ -45,9 +38,7 @@ def _make_adapters(
         elif rc.name == "voyage":
             adapters["voyage"] = make_voyage_reranker(rc.client, _get_model_name("voyage", overrides, "rerank-2.5"))
         elif rc.name == "zerank":
-            # Only the sync ZeroEntropy client goes into sync adapters; the
-            # async AsyncZeroEntropy client doesn't expose a callable .rerank
-            # at the top level, so guard against picking it up here.
+            # Guard against picking up the async AsyncZeroEntropy client here.
             if hasattr(rc.client, "models") and not inspect.iscoroutinefunction(
                 rc.client.models.rerank
             ):
@@ -55,7 +46,7 @@ def _make_adapters(
                     rc.client, _get_model_name("zerank", overrides, "zerank-2")
                 )
         elif callable(rc.client) and not hasattr(rc.client, 'rerank'):
-            # Custom callable reranker (already wrapped)
+            # Already-wrapped custom callable reranker.
             adapters[rc.name] = rc.client
 
     return adapters
@@ -80,7 +71,7 @@ def _make_async_adapters(
                     rc.client, _get_model_name("zerank", overrides, "zerank-2")
                 )
         elif callable(rc.client) and inspect.iscoroutinefunction(rc.client):
-            # Custom async callable reranker (already wrapped)
+            # Already-wrapped custom async callable reranker.
             adapters[rc.name] = rc.client
         elif hasattr(rc.client, 'rerank') and inspect.iscoroutinefunction(rc.client.rerank):
             if rc.name == "cohere":
@@ -103,7 +94,7 @@ def _pick_provider(requested: Optional[Provider], available: Dict[str, Any]) -> 
     if len(present) == 1:
         return present[0]  # type: ignore[return-value]
 
-    return "cohere"  # Fallback
+    return "cohere"
 
 
 def _rerank_single(provider: str, query: str, docs: List[str], top_k: int, rerankers: Dict) -> List[RerankItem]:
@@ -140,7 +131,6 @@ def rerank(
     if provider in RERANKER_PROVIDERS:
         return _rerank_single(provider, query, documents, top_k, rerankers)
 
-    # Hybrid mode - run all available providers
     results = {}
     for p in RERANKER_PROVIDERS:
         if p in rerankers:
@@ -177,7 +167,6 @@ async def async_rerank(
     if provider in RERANKER_PROVIDERS:
         return await _run(provider)
 
-    # Hybrid mode - run all available providers concurrently
     tasks = {p: asyncio.create_task(_run(p)) for p in RERANKER_PROVIDERS}
     results = {p: await task for p, task in tasks.items()}
 

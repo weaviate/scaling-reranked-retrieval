@@ -1,17 +1,4 @@
-"""Domain layer — the pure logic of the experiment.
+"""Domain layer — pure, deterministic experiment logic.
 
-No network, no filesystem, no provider SDKs. Everything here is deterministic
-math and data over plain Python values:
-
-    fusion.py       RRF / RSF fusion over per-provider score dicts, plus the
-                    rank-list fusion used at the listwise tier (the RSF
-                    set(pool) tie-break semantics documented in its docstring
-                    are a pinned behavior contract)
-    conditions.py   the experiment condition menu (equal-weight only) and its
-                    generator
-    metrics.py      metric-name helpers and the extra-recall-cutoff builder
-    aggregate.py    mean-across-queries / median-across-subsets aggregation
-
-Domain modules may import scaling_reranked_retrieval.config (shared constants/paths registry) and
-each other — never scaling_reranked_retrieval.application, scaling_reranked_retrieval.adapters, or any external service SDK.
+No network, filesystem, or provider SDKs; may import only scaling_reranked_retrieval.config and each other.
 """

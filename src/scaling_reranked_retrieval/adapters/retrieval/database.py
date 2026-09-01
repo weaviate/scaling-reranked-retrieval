@@ -1,11 +1,4 @@
-"""SearchBackend abstraction.
-
-Retrievers in this library are algorithm definitions; the choice of vector DB
-is an orthogonal concern. ``SearchBackend`` is the narrow interface every
-retriever depends on. ``WeaviateBackend`` is the only built-in implementation
-today, but adding a new one means writing one class — not editing every
-retriever.
-"""
+"""SearchBackend abstraction: the narrow search interface retrievers depend on."""
 from __future__ import annotations
 
 from typing import Optional, Protocol, runtime_checkable
@@ -35,11 +28,7 @@ class SearchBackend(Protocol):
 
 @runtime_checkable
 class AsyncSearchBackend(Protocol):
-    """Asynchronous mirror of :class:`SearchBackend`.
-
-    Uses ``asearch`` (not ``search``) so a single object can satisfy both
-    protocols without an awaitable / non-awaitable name collision.
-    """
+    """Async mirror of SearchBackend; named ``asearch`` so one object can satisfy both protocols."""
 
     async def asearch(
         self,
@@ -58,13 +47,7 @@ class AsyncSearchBackend(Protocol):
 
 
 class WeaviateBackend:
-    """SearchBackend backed by a Weaviate client.
-
-    The client is held on the backend instance, so the per-call kwargs that
-    used to leak through every retriever (``weaviate_client=...``) are no
-    longer needed. Sync and async clients can be combined on one backend
-    instance so a single object satisfies both Protocols.
-    """
+    """SearchBackend backed by a Weaviate client; may hold sync and/or async clients."""
 
     def __init__(
         self,
