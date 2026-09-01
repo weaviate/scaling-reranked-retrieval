@@ -6,7 +6,7 @@
 uv sync
 ```
 
-Always invoke via `uv run` — it keeps the environment synced to `uv.lock`.
+Always invoke via `uv run`, which keeps the environment synced to `uv.lock`.
 The project installs as the `scaling_reranked_retrieval` package (editable),
 so both `scripts/` and your own code can do:
 
@@ -17,7 +17,7 @@ from scaling_reranked_retrieval.domain.conditions import build_menu
 
 ## What ships, and what you rebuild
 
-The repository distributes the **first-stage hybrid retrieval pools** — one
+The repository distributes the **first-stage hybrid retrieval pools**: one
 cache per BRIGHT subset at `results/bright_<subset>/caches/k2000.json`,
 holding the top-2,000 hybrid-search document ids per query (no reranker
 scores). Everything else (cross-encoder scores, run summaries, listwise
@@ -26,8 +26,8 @@ for the providers being measured.
 
 Shipping the pools matters for reproducibility: collection **resumes into an
 existing cache entry with `hybrid_order` held fixed**, so your collection
-pass scores exactly the candidate sets the paper measured — no live Weaviate
-retrieval, and no exposure to server-side index drift.
+pass scores exactly the candidate sets the paper measured, with no live
+Weaviate retrieval and no exposure to server-side index drift.
 
 ## API keys by stage
 
@@ -50,8 +50,8 @@ uv run python scripts/k_sweep.py biology
 ```
 
 Datasets: `biology`, `earth_science`, `economics`, `psychology`, `robotics`.
-Collection is resumable per (provider, document) — interrupt and re-run
-freely; only missing scores are fetched.
+Collection is resumable per (provider, document), so interrupt and re-run
+freely. Only missing scores are fetched.
 
 From there, [docs/reproducing.md](reproducing.md) maps every paper section to
 its command, and [docs/data-formats.md](data-formats.md) documents every file
@@ -61,6 +61,7 @@ these steps read and write.
 
 ```bash
 uv run pytest tests/unit           # offline, no keys needed
-uv run pytest -m integration       # live one-call-per-provider connectivity checks;
-                                   # each provider skips if its key is absent
+uv run pytest -m integration       # live one-call-per-provider connectivity
+                                   # checks. Each provider skips if its key
+                                   # is absent.
 ```

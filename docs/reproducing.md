@@ -1,13 +1,13 @@
 # Reproducing the paper
 
 Each command maps to the paper section it produces data for. Commands marked
-**LIVE** spend API calls; everything else is a fast offline derivation over
+**LIVE** spend API calls. Everything else is a fast offline derivation over
 `results/`. See [getting-started.md](getting-started.md) for keys and setup.
 
 ## The depth sweep (paper sections "Scaling Retrieval" and "Singleton Cross-Encoders")
 
 ```bash
-# Fill the shipped k=2000 pool with scores, once per dataset (LIVE; resumable):
+# Fill the shipped k=2000 pool with scores, once per dataset (LIVE, resumable):
 uv run python scripts/run_experiment.py --dataset biology --retrieved-k 2000 --collect-only
 
 # Derive the full nested-prefix depth sweep (zero API calls):
@@ -19,7 +19,7 @@ Derived runs land in `results/bright_<subset>/runs/k{N}_from_k2000.json`.
 
 ## Native-limit retrieval stability (Appendix: Retrieval Stability)
 
-The nested-prefix sweep holds the initial ranking fixed; the robustness
+The nested-prefix sweep holds the initial ranking fixed. The robustness
 check reruns native retrieval five times at each limit:
 
 ```bash
@@ -47,8 +47,8 @@ uv run python scripts/listwise_rerank.py --all-domains --model <model>          
 uv run python scripts/listwise_top100.py -h                  # the n=100 window extension
 ```
 
-Every (query, trial) ranking is cached and resumable — re-runs only pay for
-missing calls. Models without a `MODEL_PRICES` entry require explicit
+Every (query, trial) ranking is cached and resumable, so re-runs only pay
+for missing calls. Models without a `MODEL_PRICES` entry require explicit
 `--price-in/--price-out` ($/1M tokens).
 
 ## Width: fusion and disagreement (paper section "Exploring Width in Reranking")
@@ -84,12 +84,12 @@ uv run python scripts/latency_measurement.py --dataset biology   # LIVE timing c
 - **Fusion menu is equal-weight only**
   (`scaling_reranked_retrieval.domain.conditions.CONDITIONS`): baselines, the
   three singletons, and equal-weight pair/3-way RRF+RSF blends. The paper's
-  width result is about untuned, training-free fusion; no tilted weights
+  width result is about untuned, training-free fusion. No tilted weights
   exist in the code.
 - **RSF ties.** RSF fusion produces exact score ties whose break order is
-  `PYTHONHASHSEED`-dependent (~1 query of wobble); `scripts/noise_null.py`
+  `PYTHONHASHSEED`-dependent (~1 query of wobble). `scripts/noise_null.py`
   pins the seed for its bit-reproducible sweep. Differences below ~0.01 on a
   single RSF cell are noise.
 - With ~100 queries per subset, 0.01 on a hit-based metric ≈ one query on a
-  subset (≈ one query per subset for a cross-subset mean) — treat sub-0.02
+  subset (≈ one query per subset for a cross-subset mean), so treat sub-0.02
   deltas accordingly.
