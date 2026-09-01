@@ -24,7 +24,7 @@ Per trial (trial-aligned, matching analysis/listwise_fusion.py), per query:
     "one fixed blend, re-selected by pooled-mean"). The chosen blend is
     named in the output.
   - `oracle_selector` = per-query best of the model singletons
-Derived, the paper §5.1 vocabulary:
+Derived, the paper Section 5.1 vocabulary:
   - routing value       = oracle_selector − best_static_fusion
   - selection headroom  = oracle_selector − best singleton (winner's-curse-
     exposed; >= 0 by construction)
@@ -34,7 +34,7 @@ trials per subset → median across subsets.
 
 Winner's-curse caveat (reported inline, not buried): the per-query max over
 N stochastic rankers is upward-biased under noise — the exposure the CE
-tier's noise-null (§5.1) quantifies, and it grows with N. Oracle lines are
+tier's noise-null (Section 5.1) quantifies, and it grows with N. Oracle lines are
 ceilings for a learned router, not achieved results; no listwise noise-null
 has been run.
 
@@ -236,7 +236,7 @@ def render_report(payload: dict) -> str:
         "",
         f"**Winner's-curse caveat:** `oracle-selector` is a per-query max "
         f"over {len(labels)} stochastic rankers and is upward-biased under "
-        "noise — the exposure the CE tier's noise-null (§5.1) quantifies, "
+        "noise — the exposure the CE tier's noise-null (Section 5.1) quantifies, "
         "and it grows with the number of arms. Read it as a ceiling for a "
         "learned router, not an achieved result; no listwise noise-null has "
         "been run.",

@@ -1,4 +1,4 @@
-"""Routing-vs-blending decomposition primitives (paper §5.1).
+"""Routing-vs-blending decomposition primitives (paper Section 5.1).
 
 Per query the reranking optimum decomposes into ROUTING (picking the best
 singleton per query) vs BLENDING (picking an interior fusion per query),

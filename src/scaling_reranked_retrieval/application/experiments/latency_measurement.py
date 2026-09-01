@@ -1,15 +1,15 @@
-"""Latency + payload measurement harness (MoCE §3.3 / §3.4).
+"""Latency + payload measurement harness (MoCE Section 3.3 / Section 3.4).
 
 Standalone, timing-only companion to run_experiment.py. Produces the two
 numbers the paper stubs:
 
-  §3.4 — rerank latency vs. K. Per-provider wall-clock latency to score a
+  Section 3.4 — rerank latency vs. K. Per-provider wall-clock latency to score a
          candidate pool, swept over K ∈ {100,200,500,1000,2000}, so the
          test-time-compute framing can state latency as a function of pool
          depth and back the "added latency is bounded by the slowest model,
          not the ensemble size" claim (parallel_bound vs serial_sum).
 
-  §3.3 — hybrid query latency + payload at k=2000. Single-query Weaviate
+  Section 3.3 — hybrid query latency + payload at k=2000. Single-query Weaviate
          hybrid search wall-clock and two byte figures (the serialized wire
          payload of the retrieval call, and the raw retrieved-content size the
          rerankers ingest), at retrieved_k=2000.
@@ -562,10 +562,10 @@ def write_latency_md(payloads: dict[str, dict]) -> Path:
     lines: list[str] = []
     A = lines.append
 
-    A("# Latency + Payload Measurements (MoCE §3.3 / §3.4)")
+    A("# Latency + Payload Measurements (MoCE Section 3.3 / Section 3.4)")
     A("")
-    A("Per-provider rerank latency vs. candidate-pool depth (§3.4) and "
-      "single-query hybrid-search latency + payload at k=2000 (§3.3), over "
+    A("Per-provider rerank latency vs. candidate-pool depth (Section 3.4) and "
+      "single-query hybrid-search latency + payload at k=2000 (Section 3.3), over "
       "the same randomly sampled queries per dataset. All numbers are "
       "end-to-end API latency from the experiment's network location "
       "(**not** compute-only). See each `latency_{dataset}.json` for "
@@ -583,7 +583,7 @@ def write_latency_md(payloads: dict[str, dict]) -> Path:
     A("")
 
     # Table 1: rerank latency vs K per provider (median ms across queries).
-    A("## §3.4 — Rerank latency vs. K (median ms)")
+    A("## Section 3.4 — Rerank latency vs. K (median ms)")
     A("")
     A("Per (dataset, provider): median across the sampled queries of the "
       "per-query median-of-repeats rerank latency, at each K. The "
@@ -614,7 +614,7 @@ def write_latency_md(payloads: dict[str, dict]) -> Path:
     A("")
 
     # Table 2: hybrid k=2000 latency + payload per dataset.
-    A("## §3.3 — Hybrid k=2000 latency + payload (median across queries)")
+    A("## Section 3.3 — Hybrid k=2000 latency + payload (median across queries)")
     A("")
     A("`hybrid latency` is median single-query wall-clock for a k=2000 hybrid "
       "search. `response payload` is the serialized wire size of that "

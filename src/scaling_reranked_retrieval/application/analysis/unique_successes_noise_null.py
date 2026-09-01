@@ -12,7 +12,7 @@ So how much of the real 11 / 19 / 21 (@1) is genuine model heterogeneity vs. a
 statistical artifact of taking a per-query best-of-three?
 
 This module answers that by running the EXACT unique-success counting logic from
-`unique_successes_k200.py` (`analyze_subset`) over the SAME noise clones the §5.1
+`unique_successes_k200.py` (`analyze_subset`) over the SAME noise clones the Section 5.1
 noise-null (`noise_null.py`) builds: clone ONE base model (Zerank, the strongest
 R@1 singleton) into three independent noisy copies `s_i = s + e_i`,
 `e_i ~ N(0, alpha*sigma_q)`, written into the cohere/voyage/zerank score slots,

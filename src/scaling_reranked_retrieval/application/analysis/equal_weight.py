@@ -92,7 +92,7 @@ ALL_METRICS = {**RK20_METRICS, **RK100_METRICS}
 # Order used throughout the report: primary, sidekicks, deep recall.
 METRIC_ORDER = ["recall@1", "recall@20", "recall@5", "ndcg@10", "recall@50", "recall@100"]
 
-# Noise band: do not declare a winner inside ±0.01 (§3.2b / §4.2). RSF-equal
+# Noise band: do not declare a winner inside ±0.01 (Section 3.2b / Section 4.2). RSF-equal
 # cells additionally carry ~1-query PYTHONHASHSEED tie wobble, also covered by
 # this band.
 NOISE_BAND = 0.01
@@ -110,9 +110,9 @@ REGRESSION_GUARD = [
 ]
 GUARD_TOL = 0.01
 
-# Expected §(d) "best singleton" median lines for the FULL run (all 5 subsets,
+# Expected Section (d) "best singleton" median lines for the FULL run (all 5 subsets,
 # all k). Guards (a) the median groupby is keyed right and (b) the values
-# reproduce the published §(d) table (spec §4.4/§4.5). Only checked when the
+# reproduce the published Section (d) table (spec Section 4.4/Section 4.5). Only checked when the
 # run covers ALL_SUBSETS × ALL_KS. best singleton = per-subset max of the
 # three singletons, THEN cross-subset median.
 BEST_SINGLETON_GUARD = {
@@ -173,7 +173,7 @@ def _has_all_equal_weight_keys(results: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Source resolution (§2)
+# Source resolution (Section 2)
 # ---------------------------------------------------------------------------
 
 
@@ -283,7 +283,7 @@ def build_rows(subsets: list[str], ks: list[int], metrics: list[str]) -> list[di
                         "cohere": singletons["cohere"],
                         "voyage": singletons["voyage"],
                         "zerank": singletons["zerank"],
-                        # per-cell max of the three singletons; the §(d) "best
+                        # per-cell max of the three singletons; the Section (d) "best
                         # singleton" line is the cross-subset MEDIAN of this column
                         # (per-subject max THEN median — never max-of-medians).
                         "best_singleton": max(singletons.values()),
@@ -302,7 +302,7 @@ def build_rows(subsets: list[str], ks: list[int], metrics: list[str]) -> list[di
 
 
 # ---------------------------------------------------------------------------
-# Regression guard (§4.6)
+# Regression guard (Section 4.6)
 # ---------------------------------------------------------------------------
 
 
@@ -330,7 +330,7 @@ def run_regression_guard() -> list[str]:
 def run_best_singleton_guard(rows: list[dict], subsets: list[str],
                              ks: list[int]) -> list[str]:
     """Guard the `best singleton` line: definitional (per-row max) always, and
-    the full-run median lines against the published §(d) values (spec §4.4/§4.5)."""
+    the full-run median lines against the published Section (d) values (spec Section 4.4/Section 4.5)."""
     notes: list[str] = []
     # Definitional: best_singleton is the per-cell max of the three singletons.
     for r in rows:
@@ -370,7 +370,7 @@ def run_best_singleton_guard(rows: list[dict], subsets: list[str],
 
 
 def tag_delta(delta: float) -> str:
-    """win / lose / ~tie per the ±0.01 noise band (§3.2b / §4.2)."""
+    """win / lose / ~tie per the ±0.01 noise band (Section 3.2b / Section 4.2)."""
     if delta > NOISE_BAND:
         return "win"
     if delta < -NOISE_BAND:
@@ -390,7 +390,7 @@ def fmt_delta(delta: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Markdown report (§3.2)
+# Markdown report (Section 3.2)
 # ---------------------------------------------------------------------------
 
 
@@ -531,14 +531,14 @@ def write_equal_weight_md(rows: list[dict], subsets: list[str], ks: list[int],
              "individual cross-encoders (`cohere` / `voyage` / `zerank`), the three "
              "equal-weight pairs (`cv` / `cz` / `vz`), the equal-weight `3way`, and "
              "`best_pair` (the per-cell winning pair's value — its identity can "
-             "change per cell; see §a). The **singleton lines are fusion-"
+             "change per cell; see Section a). The **singleton lines are fusion-"
              "independent** (a single reranker doesn't fuse), so the `cohere` / "
              "`voyage` / `zerank` rows are identical under RRF and RSF. NOTE: each "
              "condition's median is computed independently, so "
              "`median(3way) − median(vz)` is **not** the per-cell "
-             "`threeway_minus_best_pair` median in §(b)/(c) — medians don't commute "
+             "`threeway_minus_best_pair` median in Section (b)/(c) — medians don't commute "
              "with subtraction. Use these rows for absolute-value figures; use "
-             "§(b)/(c) for the paired delta. `best singleton` is the per-subset max "
+             "Section (b)/(c) for the paired delta. `best singleton` is the per-subset max "
              "of the three singletons, then the cross-subset median (computed at "
              "full precision — NOT the max of the three already-medianed singleton "
              "lines).")
@@ -625,7 +625,7 @@ def write_wide_table_md(rows: list[dict]) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Per-domain plot lines (§ spec: 3-row fusion figure)
+# Per-domain plot lines (spec section: 3-row fusion figure)
 # ---------------------------------------------------------------------------
 
 
@@ -638,7 +638,7 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
     fusion); singletons are fusion-independent. `fusion_over_best_singleton` =
     best equal pair (RSF) − best singleton, the signed effect the most/least
     pick is ranked by (NOTE: uniform-weight floor, smaller than the best-fusion
-    lift in §"Cross-domain" — see the figure-caption note in the spec)."""
+    lift in Section "Cross-domain" — see the figure-caption note in the spec)."""
     df = _df(rows)
     out_subsets = [s for s in want_subsets
                    if s in set(df["subset"]) ]
@@ -686,7 +686,7 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
                     "fusion_over_best_singleton": float(r["best_pair"]) - float(r["best_singleton"]),
                 })
 
-    # Most/least sanity (spec §4.2): psychology's R@1 fusion-over-best-singleton
+    # Most/least sanity (spec Section 4.2): psychology's R@1 fusion-over-best-singleton
     # effect must come out clearly above robotics's, else a wrong column is read.
     # Use the across-k PEAK — the equal-RSF effect is depth-concentrated; at
     # k=200 psychology ties (cohere alone is its published R@1 winner).
@@ -723,7 +723,7 @@ def write_per_domain_lines(rows: list[dict], want_subsets: list[str],
     L.append("")
     L.append("> **Effect definition (figure caption).** Psychology/Robotics were "
              "chosen as most/least by the documented per-cell **best-fusion** R@1 "
-             "lift (+0.078 / +0.010–0.013, §\"Cross-domain\"). The column here is "
+             "lift (+0.078 / +0.010–0.013, Section \"Cross-domain\"). The column here is "
              "**best *equal* pair − best singleton** (uniform weight), which is "
              "**smaller** than that headline because it excludes weight tuning — "
              "expected, not a discrepancy. The panels show the uniform-weight floor.")

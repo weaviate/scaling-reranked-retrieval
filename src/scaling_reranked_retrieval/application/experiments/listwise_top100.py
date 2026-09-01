@@ -176,7 +176,7 @@ def load_api_key() -> "str | None":
 
 
 # --------------------------------------------------------------------------- #
-# Permutation classification + repair (spec §"Permutation validation")         #
+# Permutation classification + repair (spec Section "Permutation validation")         #
 # --------------------------------------------------------------------------- #
 
 
@@ -1005,7 +1005,7 @@ def render_report(a: dict) -> str:
     if oh is not None and oh < FULL_RUN_HEAD_INTACT_WARN:
         A(f"> ⚠️ **FULL-RUN HEAD-INTACT@20 = {oh:.1%} — below the "
           f"{FULL_RUN_HEAD_INTACT_WARN:.0%} threshold.** The pilot's 100% did "
-          "not hold at scale; see §3 for the per-condition/trial breakdown "
+          "not hold at scale; see Section 3 for the per-condition/trial breakdown "
           "before citing head metrics.")
         A("")
     elif oh is not None:

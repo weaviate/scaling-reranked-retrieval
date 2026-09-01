@@ -1,4 +1,4 @@
-"""Noise-null robustness check for the oracle decomposition (MoCE §5.1).
+"""Noise-null robustness check for the oracle decomposition (MoCE Section 5.1).
 
 WHAT THIS ANSWERS
 -----------------
@@ -72,8 +72,8 @@ This module has two modes:
     fusion) and blending_value. Multi-hour; pins PYTHONHASHSEED=0 for the
     fusion ties.
 
-TWO-METRIC DISTINCTION (kept separate in code + output; spec §6):
-  routing_value  = oracle_selector − best_static_fusion  (paper §5.1; NOT
+TWO-METRIC DISTINCTION (kept separate in code + output; spec Section 6):
+  routing_value  = oracle_selector − best_static_fusion  (paper Section 5.1; NOT
                    sign-constrained — a fixed blend can denoise; full mode).
   selection_bias = oracle_selector − best_singleton      (singleton-only mode;
                    >= 0; the clean selection-on-noise signal).
@@ -88,7 +88,7 @@ from __future__ import annotations
 import os
 import sys
 
-# Bit-reproducibility (spec §6): DerivedSearchAgent's RSF path builds its fused
+# Bit-reproducibility (spec Section 6): DerivedSearchAgent's RSF path builds its fused
 # dict by iterating `set(pool)`, so string hash randomization (PYTHONHASHSEED)
 # changes tie-breaking at the rank-K boundary across processes — the real
 # three-model overlay can wobble by ~1 query between runs (the existing
@@ -702,8 +702,8 @@ def write_summary(agg_df, out_dir: Path, metric: str = "recall_at_1") -> Path:
 # fusion), so no PYTHONHASHSEED pin is needed for the null's determinism (A5:
 # DerivedSearchAgent's singleton path sorts scores directly, bypassing fusion).
 #
-# Two-metric distinction (spec §6) — kept separate in code and output:
-#   - routing_value      = oracle_selector − best_static_fusion  (paper §5.1
+# Two-metric distinction (spec Section 6) — kept separate in code and output:
+#   - routing_value      = oracle_selector − best_static_fusion  (paper Section 5.1
 #                          decomposition; NOT sign-constrained; full mode above).
 #   - selection_bias     = oracle_selector − best_singleton      (THIS mode;
 #                          >= 0 by construction; the winner's-curse signal).
@@ -731,7 +731,7 @@ def compute_real_overlay_singleton(
 
     Same code path as the null (singletons only, no fusion), on the true
     Cohere/Voyage/Zerank ensemble. Distinct from the paper's routing value
-    (which is vs best static fusion) — see the §6 distinction above.
+    (which is vs best static fusion) — see the Section 6 distinction above.
     """
     present = list(real.keys())
     rows: list[dict] = []
@@ -903,7 +903,7 @@ def make_figures_singleton(
 
 
 def write_summary_singleton(agg_df, out_dir: Path, metric: str = "recall_at_1") -> Path:
-    """Numbers-only stub framed on selector − singleton (spec §5/§6)."""
+    """Numbers-only stub framed on selector − singleton (spec Section 5/Section 6)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     base = agg_df["base_model"].iloc[0]
     sub = agg_df[agg_df["metric"] == metric]
@@ -913,7 +913,7 @@ def write_summary_singleton(agg_df, out_dir: Path, metric: str = "recall_at_1") 
         "(the winner's-curse signal: non-negative, manufactured purely by per-query "
         "max-over-three under zero true heterogeneity) — NOT on the paper's "
         "decomposition routing value (oracle-selector − best static fusion), which "
-        "is a different, sign-unconstrained quantity (spec §6). Base clone = "
+        "is a different, sign-unconstrained quantity (spec Section 6). Base clone = "
         f"`{base}`. Per-query MEAN, median across subsets, mean across seeds, "
         f"on `{metric}`. Informative, not a pass/fail gate."
     )
@@ -962,7 +962,7 @@ def write_summary_singleton(agg_df, out_dir: Path, metric: str = "recall_at_1") 
                 )
     lines.append("")
     lines.append(
-        "Scope (spec §7): this null tests the SELECTION (routing) component, which "
+        "Scope (spec Section 7): this null tests the SELECTION (routing) component, which "
         "is the part exposed to winner's-curse bias. Blending (oracle_config − "
         "oracle_selector) is a fused-ranking effect of genuine mixture, not per-query "
         "maximization, so it is outside this null's scope by design."

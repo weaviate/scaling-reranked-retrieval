@@ -5,7 +5,7 @@ Quantifies how much of the per-query reranking optimum comes from ROUTING
 interior fusion of several rerankers per query). Fully --k-parameterized; the
 paper sweeps retrieved_k in {100, 200, 500, 1000, 2000}, each writing its own
 oracle_config_k{N}.{json,_table.md}. retrieved_k=200 is the clean reference
-operating point (Cohere healthy). This is the empirical core of the §5.1
+operating point (Cohere healthy). This is the empirical core of the Section 5.1
 routing-vs-blending argument. (The file name still says k200 for historical
 reasons; it is a general k sweep — see the --k flag.)
 

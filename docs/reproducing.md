@@ -4,7 +4,7 @@ Each command maps to the paper section it produces data for. Commands marked
 **LIVE** spend API calls; everything else is a fast offline derivation over
 `results/`. See [getting-started.md](getting-started.md) for keys and setup.
 
-## The depth sweep (§ Scaling Retrieval, § Singleton Cross-Encoders)
+## The depth sweep (paper sections "Scaling Retrieval" and "Singleton Cross-Encoders")
 
 ```bash
 # Fill the shipped k=2000 pool with scores, once per dataset (LIVE; resumable):
@@ -27,7 +27,7 @@ uv run python scripts/hybrid_variance.py --n-trials 5   # LIVE Weaviate calls
 uv run python scripts/score_variance.py                 # reranker determinism
 ```
 
-## Reranked depth and the capture ceiling (§ Reranked Depth)
+## Reranked depth and the capture ceiling (paper section "Reranked Depth")
 
 Retaining 100 instead of 20 candidates from the cross-encoder, to measure
 Recall@50/@100 against the first-stage ceiling:
@@ -38,7 +38,7 @@ uv run python scripts/success_at_20.py
 uv run python scripts/singleton_deep_recall.py
 ```
 
-## The listwise stage (§ Singleton Listwise Rerankers, § Extended Window)
+## The listwise stage (paper sections "Singleton Listwise Rerankers" and "Extended Window")
 
 ```bash
 uv run python scripts/listwise_rerank.py --build-all-pools   # offline pool build
@@ -51,7 +51,7 @@ Every (query, trial) ranking is cached and resumable — re-runs only pay for
 missing calls. Models without a `MODEL_PRICES` entry require explicit
 `--price-in/--price-out` ($/1M tokens).
 
-## Width: fusion and disagreement (§ Exploring Width in Reranking)
+## Width: fusion and disagreement (paper section "Exploring Width in Reranking")
 
 ```bash
 uv run python scripts/equal_weight.py               # equal-weight fusion vs singletons (CE stage)
@@ -61,7 +61,7 @@ uv run python scripts/listwise_fusion.py            # equal-weight RRF at the li
 uv run python scripts/listwise_unique_successes.py  # unique successes, listwise tier
 ```
 
-## Routing headroom and its null (§ Discussion — query-dependent routing)
+## Routing headroom and its null (paper section "Discussion", query-dependent routing)
 
 The oracle ceilings behind the routing-as-future-work claim, and the
 winner's-curse controls that keep them honest:
@@ -73,7 +73,7 @@ uv run python scripts/listwise_oracle_routing.py       # selection ceiling, list
 uv run python scripts/listwise_self_oracle.py          # self-ensemble control, listwise tier
 ```
 
-## Deployment cost (§ The Cost of Depth, Width, and Stages)
+## Deployment cost (paper section "The Cost of Depth, Width, and Stages")
 
 ```bash
 uv run python scripts/latency_measurement.py --dataset biology   # LIVE timing calls

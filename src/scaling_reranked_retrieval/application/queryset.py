@@ -23,6 +23,26 @@ from scaling_reranked_retrieval.config import (
 )
 
 
+# The 12 queries excluded from every experimental result in the paper:
+# 524 collected queries -> the 512-query universe (102/116/103/99/92).
+# Each was dropped because the named provider's rerank API persistently
+# failed on it during collection, leaving that query outside the
+# all-three-present intersection that build_query_set computes. Pinned here
+# (per-subset qab query_id, as reported in QuerySet.drops) so a fresh
+# re-collection can be checked against the paper's exact universe —
+# load_and_validate warns when a cache's drops differ from this table.
+PAPER_EXPECTED_DROPS: dict[str, dict[str, set[str]]] = {
+    "biology": {"voyage": {"29"}},
+    "earth_science": {},
+    "economics": {},
+    "psychology": {"cohere": {"9", "86"}},
+    "robotics": {
+        "voyage": {"2", "48", "58", "84", "89"},
+        "zerank": {"70", "71", "76", "84", "85"},
+    },
+}
+
+
 @dataclass
 class QuerySet:
     # query text -> gold doc-id set, over the all-three-present intersection.
@@ -94,4 +114,13 @@ def load_and_validate(dataset_slug: str) -> Optional[tuple[ScoreCache, QuerySet]
         f"  cache: {len(cache.queries)} queries, intersection "
         f"{len(qs.gold)}, drops {qs.drops or '{}'}"
     )
+    expected = PAPER_EXPECTED_DROPS.get(dataset_slug)
+    if expected is not None:
+        actual = {p: set(ids) for p, ids in qs.drops.items()}
+        if actual != expected:
+            print(
+                f"  [warn] drops differ from the paper's 512-query universe: "
+                f"expected {expected or '{}'}, got {actual or '{}'} — results "
+                f"will not be query-for-query comparable to the paper"
+            )
     return cache, qs

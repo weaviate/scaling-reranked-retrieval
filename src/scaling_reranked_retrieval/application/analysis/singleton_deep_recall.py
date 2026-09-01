@@ -19,7 +19,7 @@ DENOMINATOR (the key methodology choice). Recall is computed over the
 ALL-THREE-PRESENT intersection (queries scored by cohere AND voyage AND zerank
 at k=2000), identical to agreement_analysis.build_query_set. This is what keeps
 the new R@5/R@50/R@100 lines on the SAME footing as the R@1/R@20 lines already
-plotted in §5.1 — one denominator, one axis, no seam.
+plotted in Section 5.1 — one denominator, one axis, no seam.
 
   WHY NOT read R@50/R@100 straight from runs_rk100/: those files average each
   singleton over its OWN coverage denominator (the queries that provider could
@@ -33,7 +33,7 @@ plotted in §5.1 — one denominator, one axis, no seam.
 REGRESSION GUARD (the spec lists two value sets; they live on two different
 denominators — see CLAUDE.md "Best-singleton sourcing" / equal_weight
 "Provenance / don't conflate"):
-  - HARD (±0.002): the all-5 intersection best-singleton line reproduces §5.1
+  - HARD (±0.002): the all-5 intersection best-singleton line reproduces Section 5.1
     EXACTLY — R@1 0.353/0.414/0.354/0.374/0.364, R@20 0.395/0.468/0.565/0.590/
     0.599. These are produced by the same intersection + DerivedSearchAgent
     path this script uses, so they must match to float noise. Failure here
@@ -49,7 +49,7 @@ Aggregation: MEAN across queries per subset (per-query recall@K is too coarse
 for a median — mostly 0, else 1/|gold|), MEDIAN across all five subsets for the
 cross-subset line. best_singleton per (k, cutoff)
 is the per-subset MAX over the three rerankers, THEN median across subsets
-(max-then-median — the §5.1 definition; this is what reproduces the guard
+(max-then-median — the Section 5.1 definition; this is what reproduces the guard
 line, not max-of-medians).
 
 Outputs (under results/):
@@ -141,7 +141,7 @@ CUTOFFS = ("recall_at_1", "recall_at_5", "recall_at_20", "recall_at_50", "recall
 
 SUBSETS = ["biology", "earth_science", "economics", "psychology", "robotics"]
 
-# Published all-three-present intersection sizes (CLAUDE.md / §5.1). Confirmed
+# Published all-three-present intersection sizes (CLAUDE.md / Section 5.1). Confirmed
 # at runtime; a mismatch is surfaced (not necessarily fatal — a subset may be
 # absent or a cache may have changed).
 PUBLISHED_INTERSECTION_N = {
@@ -151,7 +151,7 @@ PUBLISHED_INTERSECTION_N = {
 
 # --- Regression-guard target lines (across k = 100/200/500/1000/2000) ------- #
 
-# HARD guard (±0.002): all-5 intersection best-singleton — the §5.1 line. This
+# HARD guard (±0.002): all-5 intersection best-singleton — the Section 5.1 line. This
 # is produced by THIS script's exact path (intersection + DerivedSearchAgent +
 # per-subset-max-then-median), so it must reproduce to float noise.
 GUARD_HARD_ALL5_BEST_SINGLETON = {
@@ -288,7 +288,7 @@ def cross_subset(per_subset: dict, subsets: list[str], ks: list[int]) -> dict:
 def best_singleton(per_subset: dict, subsets: list[str], ks: list[int]) -> dict:
     """Per (k, cutoff): per-subset MAX over rerankers, THEN median across subsets.
 
-    This max-then-median order is the §5.1 best_singleton definition and is what
+    This max-then-median order is the Section 5.1 best_singleton definition and is what
     reproduces the regression-guard line (max-of-medians would differ).
     """
     return {
@@ -321,14 +321,14 @@ def run_guards(
     def at(line_for_k: dict, c: str) -> list[float]:
         return [line_for_k[str(k)][c] for k in K_VALUES]
 
-    # HARD: all-5 best-singleton == §5.1 line (exact path → float noise).
+    # HARD: all-5 best-singleton == Section 5.1 line (exact path → float noise).
     for c, target in GUARD_HARD_ALL5_BEST_SINGLETON.items():
         got = at(best_all5, c)
         for k, g, t in zip(K_VALUES, got, target):
             if abs(g - t) > GUARD_HARD_TOL:
                 hard.append(
                     f"[HARD] all-5 best_singleton {METRIC_LABEL[c]} k={k}: "
-                    f"got {g:.4f} vs §5.1 {t:.4f} (|Δ|={abs(g-t):.4f} > {GUARD_HARD_TOL})"
+                    f"got {g:.4f} vs Section 5.1 {t:.4f} (|Δ|={abs(g-t):.4f} > {GUARD_HARD_TOL})"
                 )
 
     # SOFT: all-5 per-reranker vs published own-coverage equal_weight line.
@@ -430,7 +430,7 @@ def run(
         "aggregation": "mean across queries (per subset); median across subsets",
         "notes": (
             "Every singleton cell is derived from caches/k2000.json via "
-            "DerivedSearchAgent over the all-three-present intersection (the §5.1 "
+            "DerivedSearchAgent over the all-three-present intersection (the Section 5.1 "
             "denominator), NOT read from runs_rk100/ (which uses each condition's "
             "own coverage). This keeps R@1/R@5/R@20/R@50/R@100 on one denominator "
             "and one axis. runs_rk100 own-coverage values are recorded under "
@@ -515,7 +515,7 @@ def render_table(payload, present, ks) -> str:
     A(
         "**One denominator, one axis.** Every cell is computed over the "
         "all-three-present intersection (queries scored by cohere AND voyage AND "
-        "zerank), the SAME intersection + DerivedSearchAgent path as §5.1 — so "
+        "zerank), the SAME intersection + DerivedSearchAgent path as Section 5.1 — so "
         "all four cutoff lines (R@1/R@20 already plotted, plus the new "
         "R@5/R@50/R@100) share one denominator and can be plotted on one axis. "
         "Cells are NOT read from runs_rk100/ (which averages over each "
@@ -527,7 +527,7 @@ def render_table(payload, present, ks) -> str:
         "Aggregation: MEAN across queries per subset, MEDIAN across subsets. "
         "Per-query recall@K is too coarse for a median (mostly 0, else 1/|gold|), "
         "so the query-level statistic is the mean. `best_singleton` = per-subset "
-        "max over the three rerankers, then median across subsets (the §5.1 "
+        "max over the three rerankers, then median across subsets (the Section 5.1 "
         "max-then-median order)."
     )
     A("")
@@ -572,7 +572,7 @@ def render_table(payload, present, ks) -> str:
     rg = payload["regression_guard"]
     A("## Regression guard")
     A("")
-    A("- **HARD (±%.3f)** — all-5 best-singleton reproduces the §5.1 intersection "
+    A("- **HARD (±%.3f)** — all-5 best-singleton reproduces the Section 5.1 intersection "
       "line (R@1 0.353/0.414/0.354/0.374/0.364, R@20 0.395/0.468/0.565/0.590/0.599). "
       "Same path → must match to float noise. Status: **%s**."
       % (rg["hard_tol"], "PASS" if rg["hard_ok"] else "FAIL"))

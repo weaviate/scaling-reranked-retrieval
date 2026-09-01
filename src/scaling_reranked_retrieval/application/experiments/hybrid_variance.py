@@ -481,11 +481,11 @@ def build_table(summary: dict) -> str:
     else:
         lines.append("- (none — every cell bit-identical across all 5 trials)\n")
 
-    # --- 4. Pool recall family (the §4.1 ceiling), kept for completeness ---
+    # --- 4. Pool recall family (the Section 4.1 ceiling), kept for completeness ---
     lines.append("## Pool recall@k (candidate-set ceiling — secondary)\n")
     lines.append(
         "Near-saturated and multi-gold, so a recall delta here is several "
-        "boundary crossings, not one query. Reported for the §4.1 scaling chart.\n"
+        "boundary crossings, not one query. Reported for the Section 4.1 scaling chart.\n"
     )
     ks = [str(k) for k in POOL_RECALL_KS]
     lines.append("| Subset | " + " | ".join(f"R@{k}" for k in ks) + " |")
