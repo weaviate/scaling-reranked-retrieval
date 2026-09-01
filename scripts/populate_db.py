@@ -2,11 +2,11 @@
 """Populate Weaviate with one dataset's corpus (LIVE Weaviate writes).
 
 Ingests a dataset from the DATASETS registry (e.g. bright/robotics, ~62k
-docs) into the collection the experiment retrieves against (src.config:
+docs) into the collection the experiment retrieves against (scaling_reranked_retrieval.config:
 BrightRobotics_Default), using qab's own dataset loader and collection spec
 so the schema matches what run_search_eval expects: a searchable "content"
 text property, a filterable dataset_id, and a text2vec_weaviate vector over
-Snowflake/snowflake-arctic-embed-l-v2.0 (src.config.EMBEDDING_MODEL).
+Snowflake/snowflake-arctic-embed-l-v2.0 (scaling_reranked_retrieval.config.EMBEDDING_MODEL).
 Embeddings are computed server-side by Weaviate Embeddings, so only
 WEAVIATE_URL / WEAVIATE_API_KEY are required.
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from src.adapters import qab
+from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
@@ -41,7 +41,7 @@ from query_agent_benchmarking.internal.adapters.database.naming import (  # noqa
     add_tag_to_name,
 )
 
-from src.config import DATASETS, EMBEDDING_MODEL  # noqa: E402
+from scaling_reranked_retrieval.config import DATASETS, EMBEDDING_MODEL  # noqa: E402
 
 
 def main() -> None:
@@ -50,7 +50,7 @@ def main() -> None:
         "--dataset",
         choices=sorted(DATASETS.keys()),
         required=True,
-        help="Dataset slug from src.config.DATASETS to ingest.",
+        help="Dataset slug from scaling_reranked_retrieval.config.DATASETS to ingest.",
     )
     parser.add_argument(
         "--recreate",

@@ -17,16 +17,16 @@ import argparse
 import json
 import os
 
-from src.adapters import qab
+from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
 from query_agent_benchmarking import run_search_eval  # noqa: E402
 
-from src.adapters.qab import RetrieverSearchAgent  # noqa: E402
-from src.adapters.retrieval.base_retriever import BaseRetriever  # noqa: E402
-from src.config import DATASETS, RANDOM_SEED, get_results_dir  # noqa: E402
-from src.domain.metrics import build_extra_metrics  # noqa: E402
+from scaling_reranked_retrieval.adapters.qab import RetrieverSearchAgent  # noqa: E402
+from scaling_reranked_retrieval.adapters.retrieval.base_retriever import BaseRetriever  # noqa: E402
+from scaling_reranked_retrieval.config import DATASETS, RANDOM_SEED, get_results_dir  # noqa: E402
+from scaling_reranked_retrieval.domain.metrics import build_extra_metrics  # noqa: E402
 
 
 def main() -> None:
@@ -35,7 +35,7 @@ def main() -> None:
         "--dataset",
         choices=sorted(DATASETS.keys()),
         required=True,
-        help="Dataset slug from src.config.DATASETS.",
+        help="Dataset slug from scaling_reranked_retrieval.config.DATASETS.",
     )
     parser.add_argument(
         "--retrieved-k",

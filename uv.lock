@@ -2077,57 +2077,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mixture-of-rerankers"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "cohere" },
-    { name = "matplotlib" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "openai" },
-    { name = "packaging" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "query-agent-benchmarking" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "tiktoken" },
-    { name = "voyageai" },
-    { name = "weaviate-client", extra = ["agents"] },
-    { name = "weaviate-engram" },
-    { name = "zeroentropy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "cohere", specifier = ">=5.16.1" },
-    { name = "matplotlib", specifier = ">=3.10.5" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "openai", specifier = ">=1.60" },
-    { name = "packaging", specifier = ">=23.0" },
-    { name = "pandas", specifier = ">=2.0" },
-    { name = "pyarrow", specifier = ">=15.0" },
-    { name = "pydantic", specifier = ">=2.0" },
-    { name = "query-agent-benchmarking", specifier = ">=0.7" },
-    { name = "scipy", specifier = ">=1.11" },
-    { name = "tiktoken", specifier = ">=0.7.0" },
-    { name = "voyageai", specifier = ">=0.3.4" },
-    { name = "weaviate-client", extras = ["agents"], specifier = ">=4.16.4" },
-    { name = "weaviate-engram", specifier = "==0.6.0" },
-    { name = "zeroentropy", specifier = ">=0.1.0a11" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
-
-[[package]]
 name = "more-itertools"
 version = "11.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3682,6 +3631,57 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl", hash = "sha256:096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f", size = 355540 },
     { url = "https://files.pythonhosted.org/packages/8d/fc/7eedc3510d97878876e32774eebbeb61c43f148a96e915c84229a3e967aa/safetensors-0.8.0-cp310-abi3-win_arm64.whl", hash = "sha256:f7838e5135a406ad3e02efdcb8cf2e5397d368b0154537c4fec682dbc544d452", size = 340500 },
 ]
+
+[[package]]
+name = "scaling-reranked-retrieval"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cohere" },
+    { name = "matplotlib" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "openai" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+    { name = "query-agent-benchmarking" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "tiktoken" },
+    { name = "voyageai" },
+    { name = "weaviate-client", extra = ["agents"] },
+    { name = "weaviate-engram" },
+    { name = "zeroentropy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cohere", specifier = ">=5.16.1" },
+    { name = "matplotlib", specifier = ">=3.10.5" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "openai", specifier = ">=1.60" },
+    { name = "packaging", specifier = ">=23.0" },
+    { name = "pandas", specifier = ">=2.0" },
+    { name = "pyarrow", specifier = ">=15.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "query-agent-benchmarking", specifier = ">=0.7" },
+    { name = "scipy", specifier = ">=1.11" },
+    { name = "tiktoken", specifier = ">=0.7.0" },
+    { name = "voyageai", specifier = ">=0.3.4" },
+    { name = "weaviate-client", extras = ["agents"], specifier = ">=4.16.4" },
+    { name = "weaviate-engram", specifier = "==0.6.0" },
+    { name = "zeroentropy", specifier = ">=0.1.0a11" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
 
 [[package]]
 name = "scikit-learn"

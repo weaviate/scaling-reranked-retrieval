@@ -10,9 +10,9 @@ run a retrieval query. No network: Weaviate and the provider fns are stubbed.
 import asyncio
 from pathlib import Path
 
-from src.adapters.cache import ScoreCache
-from src.application.collect import CollectScoresAgent
-import src.adapters.retrieval.weaviate_database as wdb
+from scaling_reranked_retrieval.adapters.cache import ScoreCache
+from scaling_reranked_retrieval.application.collect import CollectScoresAgent
+import scaling_reranked_retrieval.adapters.retrieval.weaviate_database as wdb
 
 
 class _Source:

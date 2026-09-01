@@ -18,7 +18,7 @@ import argparse
 import json
 from statistics import mean
 
-from src.adapters import qab
+from scaling_reranked_retrieval.adapters import qab
 
 qab.setup()
 
@@ -27,10 +27,10 @@ from query_agent_benchmarking.internal.adapters.metrics.ir_metrics import (  # n
     calculate_recall_at_k,
 )
 
-from src.application.derived import DerivedSearchAgent  # noqa: E402
-from src.application.queryset import load_and_validate  # noqa: E402
-from src.config import DATASETS, DEFAULT_RETRIEVED_K, get_results_dir  # noqa: E402
-from src.domain.conditions import build_menu  # noqa: E402
+from scaling_reranked_retrieval.application.derived import DerivedSearchAgent  # noqa: E402
+from scaling_reranked_retrieval.application.queryset import load_and_validate  # noqa: E402
+from scaling_reranked_retrieval.config import DATASETS, DEFAULT_RETRIEVED_K, get_results_dir  # noqa: E402
+from scaling_reranked_retrieval.domain.conditions import build_menu  # noqa: E402
 
 CUTS = (20, 50, 100)
 

@@ -15,7 +15,7 @@ import os
 
 import pytest
 
-from src.config import MODEL_OVERRIDES
+from scaling_reranked_retrieval.config import MODEL_OVERRIDES
 
 pytestmark = pytest.mark.integration
 
@@ -38,8 +38,8 @@ def _check(items):
 
 @pytest.mark.skipif(not os.getenv("COHERE_API_KEY"), reason="COHERE_API_KEY not set")
 def test_cohere_reachable():
-    from src.adapters.retrieval.clients import get_cohere_client
-    from src.adapters.retrieval.providers import make_cohere_reranker
+    from scaling_reranked_retrieval.adapters.retrieval.clients import get_cohere_client
+    from scaling_reranked_retrieval.adapters.retrieval.providers import make_cohere_reranker
 
     fn = make_cohere_reranker(get_cohere_client().client, MODEL_OVERRIDES["cohere"])
     _check(fn(QUERY, DOCS, top_k=2))
@@ -47,8 +47,8 @@ def test_cohere_reachable():
 
 @pytest.mark.skipif(not os.getenv("VOYAGE_API_KEY"), reason="VOYAGE_API_KEY not set")
 def test_voyage_reachable():
-    from src.adapters.retrieval.clients import get_voyage_client
-    from src.adapters.retrieval.providers import make_voyage_reranker
+    from scaling_reranked_retrieval.adapters.retrieval.clients import get_voyage_client
+    from scaling_reranked_retrieval.adapters.retrieval.providers import make_voyage_reranker
 
     fn = make_voyage_reranker(get_voyage_client().client, MODEL_OVERRIDES["voyage"])
     _check(fn(QUERY, DOCS, top_k=2))
@@ -56,8 +56,8 @@ def test_voyage_reachable():
 
 @pytest.mark.skipif(not os.getenv("ZERANK_API_KEY"), reason="ZERANK_API_KEY not set")
 def test_zerank_reachable():
-    from src.adapters.retrieval.clients import get_zerank_client
-    from src.adapters.retrieval.providers import make_zerank_reranker
+    from scaling_reranked_retrieval.adapters.retrieval.clients import get_zerank_client
+    from scaling_reranked_retrieval.adapters.retrieval.providers import make_zerank_reranker
 
     fn = make_zerank_reranker(get_zerank_client().client, MODEL_OVERRIDES["zerank"])
     _check(fn(QUERY, DOCS, top_k=2))
