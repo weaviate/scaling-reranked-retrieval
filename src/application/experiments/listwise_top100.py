@@ -100,7 +100,11 @@ HEAD_INTACT_DECISION_RATE = 0.90     # amendment 1 decision rule (head-intact@20
 FULL_RUN_HEAD_INTACT_WARN = 0.95
 # Invariant: input-pool R@100 cross-subset medians pinned by the spec. analyze()
 # refuses to write results if the measured baseline medians do not match.
-PINNED_INPUT_R100 = {"A": 0.711, "B": 0.494}
+# Re-pinned 2026-08-25 for the refreshed earth_science + robotics first-stage
+# pools (drift check + re-collection): A 0.711 -> 0.738 (earth_science's
+# refreshed zerank-top-100 ceiling moved the median); B unchanged at 0.494
+# (economics is still the median subset). Original June pins: A 0.711, B 0.494.
+PINNED_INPUT_R100 = {"A": 0.738, "B": 0.494}
 
 CONDITIONS = ("A", "B")
 COND_SLUG = {"A": "zerank_top100", "B": "hybrid_top100"}

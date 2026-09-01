@@ -30,6 +30,17 @@ dependencies = [
     "tiktoken>=0.7.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: makes live provider API calls; requires the API keys in env (skips per-provider when a key is absent)",
+]
+
 [tool.setuptools]
 packages = [
     "src",

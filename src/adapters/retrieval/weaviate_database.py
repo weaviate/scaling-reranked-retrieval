@@ -160,6 +160,42 @@ async def async_weaviate_search_tool(
             ))
     return objects
 
+# Batch size for fetch-by-id lookups. contains_any filters are sent in the
+# request body, so the bound is response size, not filter size; 500 docs of
+# BRIGHT-sized content per response is comfortable.
+_FETCH_BY_ID_BATCH = 500
+
+
+async def async_fetch_texts_by_id(
+    doc_ids: list[str],
+    collection_name: str,
+    target_property_name: str,
+    weaviate_async_client: weaviate.WeaviateAsyncClient,
+) -> dict[str, str]:
+    """Fetch target_property texts for the given dataset_ids, keyed by id.
+
+    Exact-match lookup: dataset_id is a FIELD-tokenized text property, so
+    contains_any matches whole ids. Ids absent from the collection are
+    simply missing from the result — callers decide whether that is an
+    error. Used by score-collection resume, where the doc pool is fixed by
+    the cache and only texts are needed; no retrieval query is involved.
+    """
+    collection = weaviate_async_client.collections.get(collection_name)
+    texts: dict[str, str] = {}
+    for i in range(0, len(doc_ids), _FETCH_BY_ID_BATCH):
+        batch = doc_ids[i : i + _FETCH_BY_ID_BATCH]
+        response = await collection.query.fetch_objects(
+            filters=Filter.by_property("dataset_id").contains_any(batch),
+            return_properties=["dataset_id", target_property_name],
+            limit=len(batch),
+        )
+        for obj in response.objects:
+            did = str(obj.properties.get("dataset_id") or obj.uuid)
+            content = obj.properties.get(target_property_name)
+            texts[did] = str(content) if content is not None else ""
+    return texts
+
+
 def get_tag_values(collection_name: str) -> list[str]:
     weaviate_client = weaviate.connect_to_weaviate_cloud(
         cluster_url=os.getenv("WEAVIATE_URL"),

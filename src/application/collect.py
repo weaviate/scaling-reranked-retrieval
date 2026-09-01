@@ -126,51 +126,81 @@ class CollectScoresAgent:
                 pass
 
     async def run_async(self, query: str, tenant=None) -> list[ObjectID]:
-        # Per-provider partial caching: each provider's score map can be
-        # written independently, and on a re-run we only call providers
-        # missing from the cache entry. So if Voyage fails once but Cohere
-        # and Zerank succeed, the next run only re-invokes Voyage (avoiding
-        # a re-bill on the two providers that worked the first time).
+        # Per-(provider, doc) partial caching: on a re-run we only score the
+        # pool docs missing from each provider's score map, and merge the new
+        # scores in. Exact because all three providers are cross-encoders
+        # that score each (query, doc) pair independently of batch
+        # composition (see adapters/cache.py). This covers both resume cases:
+        # a provider that failed entirely on a previous run, and a refreshed
+        # hybrid_order containing docs the old score maps never saw.
         PROVIDERS = ("cohere", "voyage", "zerank")
         SCORE_KEY = {p: f"{p}_scores" for p in PROVIDERS}
 
         entry = self.cache.queries.get(query)
-        needed = (
-            list(PROVIDERS) if entry is None
-            else [p for p in PROVIDERS if SCORE_KEY[p] not in entry]
-        )
 
-        # Fully cached already — skip Weaviate and all rerankers.
-        if entry is not None and not needed:
+        def missing_docs(pool: list[str]) -> dict[str, list[str]]:
+            return {
+                p: [d for d in pool if d not in entry.get(SCORE_KEY[p], {})]
+                for p in PROVIDERS
+            }
+
+        # Fully covered already — skip Weaviate and all rerankers. Coverage
+        # is per doc, not just key presence, so entries whose pool was
+        # refreshed after collection are not silently skipped.
+        if entry is not None and not any(missing_docs(entry["hybrid_order"]).values()):
             return [ObjectID(object_id=d) for d in entry["hybrid_order"][:20]]
 
-        # We need at least one reranker call, so we need doc_texts.
-        # (We don't cache doc_texts to keep cache size bounded; one
-        # Weaviate hybrid call per resume is much cheaper than the
-        # rerank API calls it lets us skip.)
+        # We need at least one reranker call, so we need doc texts (not
+        # cached, to keep cache size bounded). Two cases:
+        #
+        # - New query: one hybrid retrieval establishes hybrid_order AND
+        #   supplies every text.
+        # - Resume of an existing entry: hybrid_order is fixed by the cache
+        #   (it is the experiment's pool; derived runs slice prefixes of
+        #   it), so no retrieval query runs at all — the missing docs'
+        #   texts are fetched by dataset_id. Collection therefore has zero
+        #   dependence on retrieval reproducibility.
         from src.adapters.retrieval.weaviate_database import (
+            async_fetch_texts_by_id,
             async_weaviate_search_tool,
         )
 
-        sources = await async_weaviate_search_tool(
-            query=query,
-            collection_name=self.collection_name,
-            target_property_name=self.target_property,
-            retrieved_k=self.retrieved_k,
-            weaviate_async_client=self._async_client,
-            return_vector=False,
-            return_score=True,
-        )
-        doc_ids = [s.object_id for s in sources]
-        doc_texts = [s.content for s in sources]
-        n = len(sources)
-
-        # Initialize entry on first sighting; persist hybrid_order
-        # immediately so we don't redo the Weaviate call if every
-        # reranker fails this turn.
         if entry is None:
-            entry = {"hybrid_order": doc_ids}
+            sources = await async_weaviate_search_tool(
+                query=query,
+                collection_name=self.collection_name,
+                target_property_name=self.target_property,
+                retrieved_k=self.retrieved_k,
+                weaviate_async_client=self._async_client,
+                return_vector=False,
+                return_score=True,
+            )
+            text_by_id = {s.object_id: s.content for s in sources}
+            # Persist hybrid_order immediately so we don't redo the
+            # Weaviate call if every reranker fails this turn.
+            entry = {"hybrid_order": [s.object_id for s in sources]}
             self.cache.queries[query] = entry
+            missing = missing_docs(entry["hybrid_order"])
+        else:
+            missing = missing_docs(entry["hybrid_order"])
+            union = list(dict.fromkeys(d for docs in missing.values() for d in docs))
+            text_by_id = await async_fetch_texts_by_id(
+                union,
+                self.collection_name,
+                self.target_property,
+                self._async_client,
+            )
+
+        # Score only the pool docs that lack a score AND have a text. An id
+        # the fetch couldn't resolve (e.g. a doc the collection is missing
+        # relative to the corpus) is skipped, not fatal; derived runs
+        # already tolerate score gaps by dropping the doc from that
+        # provider's ranking.
+        needed = {
+            p: [d for d in docs if d in text_by_id]
+            for p, docs in missing.items()
+        }
+        needed = {p: docs for p, docs in needed.items() if docs}
 
         # Schedule only the needed providers concurrently. Use
         # return_exceptions=True so one provider's failure doesn't
@@ -180,18 +210,20 @@ class CollectScoresAgent:
             "voyage": self._voyage_fn,
             "zerank": self._zerank_fn,
         }
-        tasks = {p: provider_fns[p](query, doc_texts, top_k=n) for p in needed}
+        tasks = {
+            p: provider_fns[p](query, [text_by_id[d] for d in docs], top_k=len(docs))
+            for p, docs in needed.items()
+        }
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
         errors: dict[str, BaseException] = {}
-        for p, result in zip(tasks.keys(), results):
+        for (p, docs), result in zip(needed.items(), results):
             if isinstance(result, BaseException):
                 errors[p] = result
                 continue
-            entry[SCORE_KEY[p]] = {
-                doc_ids[item.index]: float(item.relevance_score)
-                for item in result
-            }
+            entry.setdefault(SCORE_KEY[p], {}).update(
+                {docs[item.index]: float(item.relevance_score) for item in result}
+            )
 
         # Persist whatever we got — including hybrid_order alone, in
         # the worst case where every reranker failed.
